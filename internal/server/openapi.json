@@ -1,0 +1,197 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SSH Bridge Agent API",
+    "version": "0.1.0",
+    "description": "Local API for AI Agents to execute audited SSH commands. The first execution omits session_id; subsequent calls in the same conversation reuse the returned session_id."
+  },
+  "servers": [{ "url": "http://127.0.0.1:7408" }],
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/api/v1/agent/targets": {
+      "get": {
+        "operationId": "listTargets",
+        "summary": "List enabled SSH targets available to the Agent",
+        "responses": {
+          "200": {
+            "description": "Enabled targets",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TargetList" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/executions": {
+      "post": {
+        "operationId": "executeCommand",
+        "summary": "Create an asynchronous audited SSH execution",
+        "description": "Use application/json when no files are needed. For files, use multipart/form-data with an execution request JSON string in the request field and one binary field per placeholder. A file field named migration_sql is referenced only as {{file:migration_sql}}; callers cannot provide remote paths.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ExecutionRequest" } },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["request"],
+                "properties": {
+                  "request": { "type": "string", "description": "JSON-encoded ExecutionRequest" }
+                },
+                "additionalProperties": { "type": "string", "format": "binary", "description": "Uploaded file keyed by placeholder name" }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Execution accepted",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExecutionAccepted" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionID}/executions/{executionID}": {
+      "get": {
+        "operationId": "getExecution",
+        "summary": "Recover the current or final execution result",
+        "parameters": [
+          { "$ref": "#/components/parameters/SessionID" },
+          { "$ref": "#/components/parameters/ExecutionID" }
+        ],
+        "responses": {
+          "200": { "description": "Execution state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Execution" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionID}/executions/{executionID}/wait": {
+      "get": {
+        "operationId": "waitExecution",
+        "summary": "Wait once for completion and return the result",
+        "description": "Returns immediately when terminal. If the wait timeout expires first, returns the latest pending or running state with HTTP 200.",
+        "parameters": [
+          { "$ref": "#/components/parameters/SessionID" },
+          { "$ref": "#/components/parameters/ExecutionID" },
+          { "name": "timeout", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 60, "default": 55 }, "description": "Long-poll timeout in seconds" }
+        ],
+        "responses": {
+          "200": { "description": "Terminal result or latest state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Execution" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionID}/executions/{executionID}/output": {
+      "get": {
+        "operationId": "downloadExecutionOutput",
+        "summary": "Download complete ordered stdout and stderr events",
+        "parameters": [
+          { "$ref": "#/components/parameters/SessionID" },
+          { "$ref": "#/components/parameters/ExecutionID" }
+        ],
+        "responses": {
+          "200": { "description": "NDJSON events with Base64-encoded data chunks", "content": { "application/x-ndjson": { "schema": { "type": "string", "format": "binary" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "opaque agent token" }
+    },
+    "parameters": {
+      "SessionID": { "name": "sessionID", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^session_[a-f0-9]{32}$" } },
+      "ExecutionID": { "name": "executionID", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^execution_[a-f0-9]{32}$" } }
+    },
+    "responses": {
+      "BadRequest": { "description": "Invalid request", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unauthorized": { "description": "Missing or invalid Agent token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "Resource not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Conflict": { "description": "Output is not available yet", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    },
+    "schemas": {
+      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } } },
+      "TargetList": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/TargetSummary" } }
+        }
+      },
+      "TargetSummary": {
+        "type": "object",
+        "required": ["id", "name", "description"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      },
+      "ExecutionRequest": {
+        "type": "object",
+        "required": ["target_id", "command"],
+        "additionalProperties": false,
+        "properties": {
+          "session_id": { "type": "string", "description": "Omit on first execution; reuse the returned session_id for the same Agent conversation" },
+          "target_id": { "type": "string" },
+          "session_title": { "type": "string", "description": "Optional title used only when a new session is created" },
+          "title": { "type": "string", "description": "Optional human-readable execution intent" },
+          "command": { "type": "string", "minLength": 1 },
+          "working_dir": { "type": "string", "description": "Optional existing working directory on the target" }
+        }
+      },
+      "ExecutionAccepted": {
+        "type": "object",
+        "required": ["session_id", "execution_id", "status"],
+        "properties": {
+          "session_id": { "type": "string" },
+          "execution_id": { "type": "string" },
+          "status": { "const": "pending" }
+        }
+      },
+      "Execution": {
+        "type": "object",
+        "required": ["id", "session_id", "target_id", "title", "command", "working_dir", "status", "output_size", "output_preview", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "session_id": { "type": "string" },
+          "target_id": { "type": "string" },
+          "target_name": { "type": "string" },
+          "title": { "type": "string" },
+          "command": { "type": "string", "description": "Original command template received from the Agent" },
+          "working_dir": { "type": "string" },
+          "status": { "type": "string", "enum": ["pending", "running", "succeeded", "failed", "timeout"] },
+          "exit_code": { "type": ["integer", "null"] },
+          "error_message": { "type": "string" },
+          "output_size": { "type": "integer", "minimum": 0 },
+          "output_preview": { "type": "string", "description": "Up to 64 KiB; use the output endpoint for the complete archive" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "started_at": { "type": ["string", "null"], "format": "date-time" },
+          "finished_at": { "type": ["string", "null"], "format": "date-time" },
+          "artifacts": { "type": "array", "items": { "$ref": "#/components/schemas/Artifact" } }
+        }
+      },
+      "Artifact": {
+        "type": "object",
+        "required": ["id", "execution_id", "placeholder", "original_name", "size", "sha256", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "execution_id": { "type": "string" },
+          "placeholder": { "type": "string" },
+          "original_name": { "type": "string" },
+          "remote_path": { "type": "string", "description": "System-generated path used for this execution; removed after completion" },
+          "size": { "type": "integer" },
+          "sha256": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

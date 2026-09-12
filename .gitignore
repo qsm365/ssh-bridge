@@ -1,0 +1,6 @@
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+/ssh-bridge
+ssh-bridge-data/
+.DS_Store

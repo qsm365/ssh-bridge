@@ -1,0 +1,344 @@
+package server
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"ssh-bridge/internal/config"
+	"ssh-bridge/internal/store"
+)
+
+func TestExecutionLifecycleReturnsRecoverableIDs(t *testing.T) {
+	dir := t.TempDir()
+	data, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	cfg := config.Config{Listen: "127.0.0.1:0", DataDir: dir, AgentToken: "agent-token", CommandTimeout: time.Second}
+	ts := httptest.NewServer(New(cfg, data).Handler)
+	defer ts.Close()
+	if !json.Valid(openAPISpec) {
+		t.Fatal("embedded OpenAPI document is not valid JSON")
+	}
+	specResponse, err := http.Get(ts.URL + "/api/openapi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer specResponse.Body.Close()
+	if specResponse.StatusCode != http.StatusOK {
+		t.Fatalf("OpenAPI status = %d", specResponse.StatusCode)
+	}
+
+	targetBody := bytes.NewBufferString(`{"name":"test","host":"127.0.0.1","port":22,"ssh_user":"root","private_key_path":"/definitely/missing","host_key_fingerprint":"","description":"","enabled":true}`)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/targets", targetBody)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create target status = %d", resp.StatusCode)
+	}
+	var target store.Target
+	if err := json.NewDecoder(resp.Body).Decode(&target); err != nil {
+		t.Fatal(err)
+	}
+	agentTargetsRequest, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/agent/targets", nil)
+	agentTargetsRequest.Header.Set("Authorization", "Bearer agent-token")
+	agentTargetsResponse, err := http.DefaultClient.Do(agentTargetsRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agentTargetsResponse.Body.Close()
+	agentTargetsBody, err := io.ReadAll(agentTargetsResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(agentTargetsBody, []byte(target.ID)) || bytes.Contains(agentTargetsBody, []byte("private_key_path")) {
+		t.Fatalf("unexpected Agent target response: %s", agentTargetsBody)
+	}
+	updateBody := bytes.NewBufferString(`{"name":"test-updated","host":"127.0.0.1","port":22,"ssh_user":"root","private_key_path":"/definitely/missing","host_key_fingerprint":"","description":"updated","enabled":true}`)
+	updateRequest, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/targets/"+target.ID, updateBody)
+	updateRequest.Header.Set("Content-Type", "application/json")
+	updateResponse, err := http.DefaultClient.Do(updateRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer updateResponse.Body.Close()
+	if updateResponse.StatusCode != http.StatusOK {
+		t.Fatalf("update target status = %d", updateResponse.StatusCode)
+	}
+	var updated store.Target
+	if err := json.NewDecoder(updateResponse.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "test-updated" || updated.Description != "updated" {
+		t.Fatalf("target was not updated: %+v", updated)
+	}
+	testRequest, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/targets/"+target.ID+"/test", nil)
+	testResponse, err := http.DefaultClient.Do(testRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer testResponse.Body.Close()
+	var connectionTest struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(testResponse.Body).Decode(&connectionTest); err != nil {
+		t.Fatal(err)
+	}
+	if connectionTest.Success || connectionTest.Message == "" {
+		t.Fatalf("unexpected connection test response: %+v", connectionTest)
+	}
+
+	execBody := bytes.NewBufferString(`{"target_id":"` + target.ID + `","session_title":"测试会话","title":"读取状态","command":"uptime"}`)
+	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/api/v1/executions", execBody)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer agent-token")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("execute status = %d", resp.StatusCode)
+	}
+	var accepted struct {
+		SessionID   string `json:"session_id"`
+		ExecutionID string `json:"execution_id"`
+		Status      string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&accepted); err != nil {
+		t.Fatal(err)
+	}
+	if accepted.SessionID == "" || accepted.ExecutionID == "" || accepted.Status != "pending" {
+		t.Fatalf("unexpected response: %+v", accepted)
+	}
+
+	waitURL := ts.URL + "/api/v1/sessions/" + accepted.SessionID + "/executions/" + accepted.ExecutionID + "/wait?timeout=2"
+	req, _ = http.NewRequest(http.MethodGet, waitURL, nil)
+	req.Header.Set("Authorization", "Bearer agent-token")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var execution store.Execution
+	if err := json.NewDecoder(resp.Body).Decode(&execution); err != nil {
+		t.Fatal(err)
+	}
+	if execution.Status != "failed" {
+		t.Fatalf("status = %q, want failed", execution.Status)
+	}
+
+	var multipartBody bytes.Buffer
+	multipartWriter := multipart.NewWriter(&multipartBody)
+	requestJSON := `{"target_id":"` + target.ID + `","session_title":"文件测试","title":"执行 SQL 文件","command":"cat {{file:sql}}"}`
+	if err := multipartWriter.WriteField("request", requestJSON); err != nil {
+		t.Fatal(err)
+	}
+	filePart, err := multipartWriter.CreateFormFile("sql", "query.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := filePart.Write([]byte("SELECT 1;\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := multipartWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	uploadRequest, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/executions", &multipartBody)
+	uploadRequest.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	uploadRequest.Header.Set("Authorization", "Bearer agent-token")
+	uploadResponse, err := http.DefaultClient.Do(uploadRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uploadResponse.Body.Close()
+	if uploadResponse.StatusCode != http.StatusAccepted {
+		t.Fatalf("multipart execute status = %d", uploadResponse.StatusCode)
+	}
+	var uploadAccepted struct {
+		SessionID   string `json:"session_id"`
+		ExecutionID string `json:"execution_id"`
+	}
+	if err := json.NewDecoder(uploadResponse.Body).Decode(&uploadAccepted); err != nil {
+		t.Fatal(err)
+	}
+	uploadWaitURL := ts.URL + "/api/v1/sessions/" + uploadAccepted.SessionID + "/executions/" + uploadAccepted.ExecutionID + "/wait?timeout=2"
+	uploadWaitRequest, _ := http.NewRequest(http.MethodGet, uploadWaitURL, nil)
+	uploadWaitRequest.Header.Set("Authorization", "Bearer agent-token")
+	uploadWaitResponse, err := http.DefaultClient.Do(uploadWaitRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uploadWaitResponse.Body.Close()
+	var uploadedExecution store.Execution
+	if err := json.NewDecoder(uploadWaitResponse.Body).Decode(&uploadedExecution); err != nil {
+		t.Fatal(err)
+	}
+	if len(uploadedExecution.Artifacts) != 1 || uploadedExecution.Artifacts[0].Placeholder != "sql" || uploadedExecution.Artifacts[0].OriginalName != "query.sql" {
+		t.Fatalf("unexpected artifacts: %+v", uploadedExecution.Artifacts)
+	}
+	outputResponse, err := http.Get(ts.URL + "/api/v1/executions/" + uploadedExecution.ID + "/output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outputResponse.Body.Close()
+	if outputResponse.StatusCode != http.StatusOK {
+		t.Fatalf("download output status = %d", outputResponse.StatusCode)
+	}
+	downloadURL := ts.URL + "/api/v1/executions/" + uploadedExecution.ID + "/artifacts/" + uploadedExecution.Artifacts[0].ID
+	downloadResponse, err := http.Get(downloadURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer downloadResponse.Body.Close()
+	downloaded, err := io.ReadAll(downloadResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(downloaded) != "SELECT 1;\n" {
+		t.Fatalf("downloaded artifact = %q", downloaded)
+	}
+}
+
+func TestAgentTokenSupportsCodexHeaderHelper(t *testing.T) {
+	app := &App{agentToken: "agent-token"}
+
+	bearer := httptest.NewRequest(http.MethodGet, "/", nil)
+	bearer.Header.Set("Authorization", "Bearer agent-token")
+	if !app.hasAgentToken(bearer) {
+		t.Fatal("Bearer token should be accepted")
+	}
+
+	helper := httptest.NewRequest(http.MethodGet, "/", nil)
+	helper.Header.Set("X-SSH-Bridge-Token", "agent-token")
+	if !app.hasAgentToken(helper) {
+		t.Fatal("Codex header helper token should be accepted")
+	}
+
+	invalid := httptest.NewRequest(http.MethodGet, "/", nil)
+	invalid.Header.Set("X-SSH-Bridge-Token", "wrong-token")
+	if app.hasAgentToken(invalid) {
+		t.Fatal("invalid helper token should be rejected")
+	}
+}
+
+func TestNormalizeHostKeyFingerprint(t *testing.T) {
+	const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB9QHHO39SSF56xdwRYHb0wMHR4pasK/nuYhBJiyTsOn"
+	const want = "SHA256:3Vh0AdOl3sPju9a1YU655VmxpgbVzFA9hESj78keTtQ"
+	for _, input := range []string{key, "server.example " + key, want} {
+		got, err := normalizeHostKeyFingerprint(input)
+		if err != nil {
+			t.Fatalf("normalize %q: %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("normalize %q = %q, want %q", input, got, want)
+		}
+	}
+	if _, err := normalizeHostKeyFingerprint("not a host key"); err == nil {
+		t.Fatal("invalid host key was accepted")
+	}
+	if got, err := normalizeHostKeyFingerprint(""); err != nil || got != "" {
+		t.Fatalf("empty optional host key = %q, %v", got, err)
+	}
+	request := targetRequest{Name: "test", Host: "127.0.0.1", Port: 22, SSHUser: "root", PrivateKeyPath: "/tmp/key"}
+	if message := validateTarget(request); message != "" {
+		t.Fatalf("optional host key rejected: %s", message)
+	}
+}
+
+func TestAgentTokenShownOnceAndRotationInvalidatesOldToken(t *testing.T) {
+	dir := t.TempDir()
+	data, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	cfg := config.Config{Listen: "127.0.0.1:0", DataDir: dir, AgentToken: "old-token", RevealAgentToken: true, CommandTimeout: time.Second}
+	ts := httptest.NewServer(New(cfg, data).Handler)
+	defer ts.Close()
+
+	first, err := http.Get(ts.URL + "/api/v1/agent-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstInfo struct {
+		Token        string `json:"token"`
+		TokenVisible bool   `json:"token_visible"`
+	}
+	if err := json.NewDecoder(first.Body).Decode(&firstInfo); err != nil {
+		first.Body.Close()
+		t.Fatal(err)
+	}
+	first.Body.Close()
+	if !firstInfo.TokenVisible || firstInfo.Token != "old-token" {
+		t.Fatalf("unexpected first token response: %+v", firstInfo)
+	}
+
+	second, err := http.Get(ts.URL + "/api/v1/agent-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondInfo struct {
+		Token        string `json:"token"`
+		TokenVisible bool   `json:"token_visible"`
+	}
+	if err := json.NewDecoder(second.Body).Decode(&secondInfo); err != nil {
+		second.Body.Close()
+		t.Fatal(err)
+	}
+	second.Body.Close()
+	if secondInfo.TokenVisible || secondInfo.Token != "" {
+		t.Fatalf("token was shown more than once: %+v", secondInfo)
+	}
+
+	rotateRequest, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/agent-token/regenerate", nil)
+	rotateResponse, err := http.DefaultClient.Do(rotateRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rotated struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(rotateResponse.Body).Decode(&rotated); err != nil {
+		rotateResponse.Body.Close()
+		t.Fatal(err)
+	}
+	rotateResponse.Body.Close()
+	if rotated.Token == "" || rotated.Token == "old-token" {
+		t.Fatalf("unexpected rotated token: %q", rotated.Token)
+	}
+
+	oldRequest, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/agent/targets", nil)
+	oldRequest.Header.Set("Authorization", "Bearer old-token")
+	oldResponse, err := http.DefaultClient.Do(oldRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldResponse.Body.Close()
+	if oldResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old token status = %d", oldResponse.StatusCode)
+	}
+	newRequest, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/agent/targets", nil)
+	newRequest.Header.Set("Authorization", "Bearer "+rotated.Token)
+	newResponse, err := http.DefaultClient.Do(newRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newResponse.Body.Close()
+	if newResponse.StatusCode != http.StatusOK {
+		t.Fatalf("new token status = %d", newResponse.StatusCode)
+	}
+}
