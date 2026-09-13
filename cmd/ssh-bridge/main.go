@@ -13,6 +13,7 @@ import (
 )
 
 func main() {
+	mode := flag.String("mode", config.ModeLocal, "run mode: local or server")
 	listen := flag.String("listen", "127.0.0.1:7408", "HTTP listen address")
 	dataDir := flag.String("data-dir", "./ssh-bridge-data", "local data directory")
 	flag.Parse()
@@ -25,8 +26,10 @@ func main() {
 	}
 
 	cfg := config.Config{
+		Mode:             *mode,
 		Listen:           *listen,
 		DataDir:          *dataDir,
+		DatabaseURL:      os.Getenv("SSH_BRIDGE_DATABASE_URL"),
 		AgentToken:       token,
 		RevealAgentToken: generated,
 		CommandTimeout:   10 * time.Minute,
@@ -34,14 +37,19 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatal(err)
 	}
-	data, err := store.Open(cfg.DatabasePath())
+	var data *store.Store
+	if cfg.Mode == config.ModeServer {
+		data, err = store.OpenPostgres(cfg.DatabaseURL)
+	} else {
+		data, err = store.Open(cfg.DatabasePath())
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer data.Close()
 
 	app := server.New(cfg, data)
-	log.Printf("SSH Bridge is available at http://%s", *listen)
+	log.Printf("SSH Bridge %s mode is available at http://%s (%s)", cfg.Mode, *listen, cfg.DatabaseName())
 	if generated {
 		log.Printf("Agent Token has been generated; open http://%s/agent-access to copy it once", *listen)
 	}

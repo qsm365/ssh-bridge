@@ -1,10 +1,23 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { api, type SystemInfo } from './api'
 
 const route = useRoute()
 const mobileNavOpen = ref(false)
+const systemInfo = ref<SystemInfo>({ mode: 'local', database: 'sqlite', mock: false, openapi_url: '/api/openapi.json', mcp_url: '/mcp' })
 
+onMounted(async () => {
+  try {
+    systemInfo.value = await api.systemInfo()
+  } catch {
+    // Keep the local defaults while the service is temporarily unavailable.
+  }
+})
+
+const modeTitle = computed(() => systemInfo.value.mode === 'server' ? '服务端模式' : '本地模式')
+const modeBadge = computed(() => systemInfo.value.mode.toUpperCase())
+const modeStorage = computed(() => systemInfo.value.database === 'postgresql' ? 'PostgreSQL · 本地文件' : 'SQLite · 本地文件')
 
 const pageTitle = computed(() => {
   if (route.path.startsWith('/sessions/')) return '会话详情'
@@ -46,7 +59,7 @@ const pageTitle = computed(() => {
       <div class="sidebar-footer">
         <div class="mode-card">
           <span class="live-dot"></span>
-          <div><strong>本地模式</strong><small>SQLite · 本地文件</small></div>
+          <div><strong>{{ modeTitle }}</strong><small>{{ modeStorage }}</small></div>
         </div>
         <div class="user-card">
           <div class="avatar">A</div>
@@ -65,7 +78,7 @@ const pageTitle = computed(() => {
           <p>查看 AI 通过 SSH Bridge 发起的实际操作</p>
         </div>
         <div class="top-actions">
-          <span class="mock-pill">LOCAL</span>
+          <span class="mock-pill">{{ modeBadge }}</span>
           <button class="icon-button" title="通知">◌<span class="notification-dot"></span></button>
         </div>
       </header>

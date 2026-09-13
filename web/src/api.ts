@@ -11,6 +11,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  systemInfo: () => request<SystemInfo>('/system/info'),
   targets: () => request<{ items: Target[] }>('/targets'),
   createTarget: (body: object) => request<Target>('/targets', { method: 'POST', body: JSON.stringify(body) }),
   updateTarget: (id: string, body: object) => request<Target>(`/targets/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
@@ -26,6 +27,7 @@ export const api = {
 
 export interface ConnectionTest { success: boolean; duration_ms: number; message: string }
 export interface AgentTokenInfo { configured: boolean; token: string; token_visible: boolean; mcp_url: string }
+export interface SystemInfo { mode: 'local' | 'server'; database: 'sqlite' | 'postgresql'; mock: boolean; openapi_url: string; mcp_url: string }
 
 export function formatTime(value: string | null) {
   if (!value) return '—'

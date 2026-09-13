@@ -235,6 +235,53 @@ func TestAgentTokenSupportsCodexHeaderHelper(t *testing.T) {
 	}
 }
 
+func TestSystemInfoAndReadinessReflectRuntime(t *testing.T) {
+	dir := t.TempDir()
+	data, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Mode: config.ModeServer, Listen: "127.0.0.1:0", DataDir: dir, DatabaseURL: "postgres://configured", AgentToken: "agent-token", CommandTimeout: time.Second}
+	ts := httptest.NewServer(New(cfg, data).Handler)
+	defer ts.Close()
+
+	response, err := http.Get(ts.URL + "/api/v1/system/info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var info struct {
+		Mode     string `json:"mode"`
+		Database string `json:"database"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode != config.ModeServer || info.Database != "postgresql" {
+		t.Fatalf("system info = %+v", info)
+	}
+
+	ready, err := http.Get(ts.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready.Body.Close()
+	if ready.StatusCode != http.StatusOK {
+		t.Fatalf("ready status = %d", ready.StatusCode)
+	}
+	if err := data.Close(); err != nil {
+		t.Fatal(err)
+	}
+	notReady, err := http.Get(ts.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer notReady.Body.Close()
+	if notReady.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("not-ready status = %d", notReady.StatusCode)
+	}
+}
+
 func TestNormalizeHostKeyFingerprint(t *testing.T) {
 	const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB9QHHO39SSF56xdwRYHb0wMHR4pasK/nuYhBJiyTsOn"
 	const want = "SHA256:3Vh0AdOl3sPju9a1YU655VmxpgbVzFA9hESj78keTtQ"

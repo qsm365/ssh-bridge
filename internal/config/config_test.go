@@ -6,12 +6,27 @@ import (
 )
 
 func TestLocalModeRejectsNonLoopbackListener(t *testing.T) {
-	base := Config{Listen: "127.0.0.1:7408", AgentToken: "token", CommandTimeout: time.Minute}
+	base := Config{Mode: ModeLocal, Listen: "127.0.0.1:7408", AgentToken: "token", CommandTimeout: time.Minute}
 	if err := base.Validate(); err != nil {
 		t.Fatalf("loopback listener rejected: %v", err)
 	}
 	base.Listen = "0.0.0.0:7408"
 	if err := base.Validate(); err == nil {
 		t.Fatal("non-loopback listener was accepted")
+	}
+}
+
+func TestServerModeRequiresPostgresAndLoopbackDuringStageOne(t *testing.T) {
+	base := Config{Mode: ModeServer, Listen: "127.0.0.1:7408", AgentToken: "token", CommandTimeout: time.Minute}
+	if err := base.Validate(); err == nil {
+		t.Fatal("server mode without database URL was accepted")
+	}
+	base.DatabaseURL = "postgres://bridge:secret@localhost/bridge"
+	if err := base.Validate(); err != nil {
+		t.Fatalf("valid server config rejected: %v", err)
+	}
+	base.Listen = "0.0.0.0:7408"
+	if err := base.Validate(); err == nil {
+		t.Fatal("non-loopback server listener was accepted before admin authentication")
 	}
 }

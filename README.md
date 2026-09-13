@@ -1,6 +1,6 @@
 # SSH Bridge
 
-面向 AI Agent 的轻量 SSH 执行代理与事后审计工具。当前实现优先支持本机单文件运行：管理页面仅监听 localhost，元数据保存到 SQLite，完整命令输出保存为本地文件。
+面向 AI Agent 的轻量 SSH 执行代理与事后审计工具。默认的 Local 模式以单文件运行，元数据保存到 SQLite；Server 模式的基础框架可连接 PostgreSQL。两种模式的完整命令输出均保存为本地文件。
 
 ## 当前已实现
 
@@ -17,8 +17,10 @@
 - 会话聚合、异常标记、命令与结果预览
 - SQLite 元数据和本地 JSONL 完整输出；单次输出上限 50 MiB
 - 服务重启时，将未完成记录标记为失败，避免一直停留在执行中
+- `local` / `server` 双模式，以及 SQLite / PostgreSQL 编号数据库迁移
+- `/readyz` 数据库就绪检查和动态运行模式标识
 
-初版暂不包含审批、记录清理、SSO、S3 和细粒度用户授权。
+Server 模式目前仍处于分阶段开发中，管理员登录和具名 Agent 权限将在后续阶段加入。在此之前 Server 模式同样只允许监听回环地址。初版暂不包含审批、记录清理、SSO 和 S3。
 
 ## 构建与运行
 
@@ -35,6 +37,17 @@ go build -o ssh-bridge ./cmd/ssh-bridge
 访问 `http://127.0.0.1:7408` 后直接进入管理页面。为了避免无登录管理台暴露到网络，本地模式只允许监听 localhost 或其他回环地址。
 
 首次启动会生成 Agent Token 并以 `0600` 权限保存到数据目录的 `agent-token` 文件中。完整 Token 只会在“Agent 接入”页面首次读取时展示一次；重新生成后旧 Token 立即失效。也可以在数据目录尚未初始化时用 `SSH_BRIDGE_AGENT_TOKEN` 提供初始值，之后以本地 Token 文件为准。
+
+### Server 模式（阶段一）
+
+阶段一使用 PostgreSQL 保存元数据，但仍沿用现有的单 Agent Token，并且管理页面尚未增加登录保护，因此只能监听 localhost：
+
+```bash
+export SSH_BRIDGE_DATABASE_URL='postgres://ssh_bridge:password@127.0.0.1:5432/ssh_bridge?sslmode=disable'
+./ssh-bridge --mode server --listen 127.0.0.1:7408 --data-dir ./ssh-bridge-data
+```
+
+服务启动时会自动执行尚未应用的编号迁移。`GET /healthz` 表示进程存活，`GET /readyz` 会实际检查数据库连接。执行输出和上传文件仍写入 `--data-dir`，不会写入 PostgreSQL。当前阶段不要把管理端口暴露到其他机器或公网。
 
 首次运行建议按以下顺序操作：
 

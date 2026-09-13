@@ -69,6 +69,9 @@ var placeholderPattern = regexp.MustCompile(`\{\{file:([A-Za-z0-9_-]{1,64})\}\}`
 var openAPISpec []byte
 
 func New(cfg config.Config, data *store.Store) *http.Server {
+	if cfg.Mode == "" {
+		cfg.Mode = config.ModeLocal
+	}
 	a := &App{cfg: cfg, store: data, runner: &executor.Runner{Store: data, OutputDir: cfg.OutputDir(), Timeout: cfg.CommandTimeout}, agentToken: cfg.AgentToken}
 	if cfg.RevealAgentToken {
 		a.oneTimeToken = cfg.AgentToken
@@ -78,6 +81,7 @@ func New(cfg config.Config, data *store.Store) *http.Server {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("GET /readyz", a.ready)
 	mux.HandleFunc("GET /api/v1/system/info", a.systemInfo)
 	mux.HandleFunc("GET /api/v1/agent-token", a.admin(a.getAgentToken))
 	mux.HandleFunc("POST /api/v1/agent-token/regenerate", a.admin(a.regenerateAgentToken))
@@ -116,7 +120,18 @@ func decode(w http.ResponseWriter, r *http.Request, dst any) error {
 	return dec.Decode(dst)
 }
 func (a *App) systemInfo(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{"mode": "local", "database": "sqlite", "mock": false, "openapi_url": "/api/openapi.json", "mcp_url": "/mcp"})
+	jsonResponse(w, http.StatusOK, map[string]any{"mode": a.cfg.Mode, "database": a.cfg.DatabaseName(), "mock": false, "openapi_url": "/api/openapi.json", "mcp_url": "/mcp"})
+}
+
+func (a *App) ready(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := a.store.Ping(ctx); err != nil {
+		apiError(w, http.StatusServiceUnavailable, "database is not ready")
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
 }
 
 func (a *App) openAPI(w http.ResponseWriter, _ *http.Request) {
