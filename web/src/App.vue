@@ -17,7 +17,8 @@ onMounted(async () => {
 
 const modeTitle = computed(() => systemInfo.value.mode === 'server' ? '服务端模式' : '本地模式')
 const modeBadge = computed(() => systemInfo.value.mode.toUpperCase())
-const modeStorage = computed(() => systemInfo.value.database === 'postgresql' ? 'PostgreSQL · 本地文件' : 'SQLite · 本地文件')
+const databaseLabel = computed(() => ({ sqlite: 'SQLite', postgresql: 'PostgreSQL', mysql: 'MySQL' })[systemInfo.value.database])
+const modeStorage = computed(() => `${databaseLabel.value} · 本地文件`)
 
 const pageTitle = computed(() => {
   if (route.path.startsWith('/sessions/')) return '会话详情'

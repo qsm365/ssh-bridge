@@ -39,7 +39,7 @@ func main() {
 	}
 	var data *store.Store
 	if cfg.Mode == config.ModeServer {
-		data, err = store.OpenPostgres(cfg.DatabaseURL)
+		data, err = store.OpenServerDatabase(cfg.DatabaseName(), cfg.DatabaseURL)
 	} else {
 		data, err = store.Open(cfg.DatabasePath())
 	}

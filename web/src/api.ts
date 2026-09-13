@@ -27,7 +27,7 @@ export const api = {
 
 export interface ConnectionTest { success: boolean; duration_ms: number; message: string }
 export interface AgentTokenInfo { configured: boolean; token: string; token_visible: boolean; mcp_url: string }
-export interface SystemInfo { mode: 'local' | 'server'; database: 'sqlite' | 'postgresql'; mock: boolean; openapi_url: string; mcp_url: string }
+export interface SystemInfo { mode: 'local' | 'server'; database: 'sqlite' | 'postgresql' | 'mysql'; mock: boolean; openapi_url: string; mcp_url: string }
 
 export function formatTime(value: string | null) {
   if (!value) return '—'

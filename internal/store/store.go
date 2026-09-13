@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
@@ -94,6 +97,60 @@ func OpenPostgres(databaseURL string) (*Store, error) {
 	return open(db, "postgres")
 }
 
+func OpenServerDatabase(databaseName, databaseURL string) (*Store, error) {
+	switch databaseName {
+	case "postgresql":
+		return OpenPostgres(databaseURL)
+	case "mysql":
+		return OpenMySQL(databaseURL)
+	default:
+		return nil, fmt.Errorf("unsupported server database %q", databaseName)
+	}
+}
+
+func OpenMySQL(databaseURL string) (*Store, error) {
+	dsn, err := mysqlDSN(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	return open(db, "mysql")
+}
+
+func mysqlDSN(databaseURL string) (string, error) {
+	parsed, err := url.Parse(databaseURL)
+	if err != nil || parsed.Scheme != "mysql" {
+		return "", errors.New("MySQL database URL must use mysql://")
+	}
+	databaseName := strings.TrimPrefix(parsed.Path, "/")
+	if parsed.User == nil || parsed.User.Username() == "" || parsed.Host == "" || databaseName == "" {
+		return "", errors.New("MySQL database URL must include user, host, and database name")
+	}
+	password, _ := parsed.User.Password()
+	cfg := mysqldriver.NewConfig()
+	cfg.User = parsed.User.Username()
+	cfg.Passwd = password
+	cfg.Net = "tcp"
+	cfg.Addr = parsed.Host
+	if parsed.Port() == "" {
+		cfg.Addr = net.JoinHostPort(parsed.Hostname(), "3306")
+	}
+	cfg.DBName = databaseName
+	cfg.Params = make(map[string]string, len(parsed.Query()))
+	for key, values := range parsed.Query() {
+		if len(values) != 0 {
+			cfg.Params[key] = values[len(values)-1]
+		}
+	}
+	return cfg.FormatDSN(), nil
+}
+
 func open(db *sql.DB, dialect string) (*Store, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -148,7 +205,7 @@ type migration struct {
 	statements []string
 }
 
-var migrations = []migration{{version: 1, statements: []string{
+var sqlitePostgresMigrations = []migration{{version: 1, statements: []string{
 	`CREATE TABLE IF NOT EXISTS targets (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL,
  ssh_user TEXT NOT NULL, private_key_path TEXT NOT NULL, host_key_fingerprint TEXT NOT NULL,
@@ -175,11 +232,49 @@ var migrations = []migration{{version: 1, statements: []string{
 	`CREATE INDEX IF NOT EXISTS idx_executions_created ON executions(created_at DESC)`,
 }}}
 
+var mysqlMigrations = []migration{{version: 1, statements: []string{
+	`CREATE TABLE IF NOT EXISTS targets (
+ id VARCHAR(64) PRIMARY KEY, name VARCHAR(255) NOT NULL, host VARCHAR(255) NOT NULL, port INTEGER NOT NULL,
+ ssh_user TEXT NOT NULL, private_key_path TEXT NOT NULL, host_key_fingerprint TEXT NOT NULL,
+ description TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+ created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL
+)`,
+	`CREATE TABLE IF NOT EXISTS agent_sessions (
+ id VARCHAR(64) PRIMARY KEY, title TEXT NOT NULL, created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL
+)`,
+	`CREATE TABLE IF NOT EXISTS executions (
+ id VARCHAR(64) PRIMARY KEY, session_id VARCHAR(64) NOT NULL REFERENCES agent_sessions(id),
+ target_id VARCHAR(64) NOT NULL REFERENCES targets(id), title TEXT NOT NULL, command TEXT NOT NULL,
+ working_dir TEXT NOT NULL, status VARCHAR(20) NOT NULL, exit_code INTEGER, error_message TEXT NOT NULL,
+ output_path TEXT NOT NULL, output_size BIGINT NOT NULL DEFAULT 0, output_preview TEXT NOT NULL,
+ created_at VARCHAR(40) NOT NULL, started_at VARCHAR(40), finished_at VARCHAR(40)
+)`,
+	`CREATE TABLE IF NOT EXISTS execution_artifacts (
+ id VARCHAR(64) PRIMARY KEY, execution_id VARCHAR(64) NOT NULL REFERENCES executions(id),
+ placeholder VARCHAR(64) NOT NULL, original_name TEXT NOT NULL, local_path TEXT NOT NULL,
+ remote_path TEXT NOT NULL, size BIGINT NOT NULL, sha256 VARCHAR(64) NOT NULL,
+ created_at VARCHAR(40) NOT NULL, UNIQUE(execution_id, placeholder)
+)`,
+	`CREATE INDEX idx_executions_session_created ON executions(session_id, created_at)`,
+	`CREATE INDEX idx_executions_created ON executions(created_at DESC)`,
+}}}
+
+func (s *Store) migrations() []migration {
+	if s.dialect == "mysql" {
+		return mysqlMigrations
+	}
+	return sqlitePostgresMigrations
+}
+
 func (s *Store) migrate(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+	migrationTable := `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`
+	if s.dialect == "mysql" {
+		migrationTable = `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at VARCHAR(40) NOT NULL)`
+	}
+	if _, err := s.db.ExecContext(ctx, migrationTable); err != nil {
 		return fmt.Errorf("create migration table: %w", err)
 	}
-	for _, item := range migrations {
+	for _, item := range s.migrations() {
 		var exists int
 		err := s.queryRow(ctx, `SELECT 1 FROM schema_migrations WHERE version=?`, item.version).Scan(&exists)
 		if err == nil {
@@ -307,13 +402,13 @@ func (s *Store) CreateExecution(ctx context.Context, session AgentSession, e Exe
 			return err
 		}
 	}
-	_, err = tx.ExecContext(ctx, s.bind(`INSERT INTO executions(id,session_id,target_id,title,command,working_dir,status,created_at) VALUES(?,?,?,?,?,?,?,?)`), e.ID, e.SessionID, e.TargetID, e.Title, e.Command, e.WorkingDir, e.Status, now)
+	_, err = tx.ExecContext(ctx, s.bind(`INSERT INTO executions(id,session_id,target_id,title,command,working_dir,status,exit_code,error_message,output_path,output_size,output_preview,created_at,started_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`), e.ID, e.SessionID, e.TargetID, e.Title, e.Command, e.WorkingDir, e.Status, e.ExitCode, e.ErrorMessage, e.OutputPath, e.OutputSize, e.OutputPreview, now, nil, nil)
 	if err != nil {
 		return err
 	}
 	for _, artifact := range artifacts {
 		created := artifact.CreatedAt.UTC().Format(time.RFC3339Nano)
-		if _, err = tx.ExecContext(ctx, s.bind(`INSERT INTO execution_artifacts(id,execution_id,placeholder,original_name,local_path,size,sha256,created_at) VALUES(?,?,?,?,?,?,?,?)`), artifact.ID, e.ID, artifact.Placeholder, artifact.OriginalName, artifact.LocalPath, artifact.Size, artifact.SHA256, created); err != nil {
+		if _, err = tx.ExecContext(ctx, s.bind(`INSERT INTO execution_artifacts(id,execution_id,placeholder,original_name,local_path,remote_path,size,sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?)`), artifact.ID, e.ID, artifact.Placeholder, artifact.OriginalName, artifact.LocalPath, artifact.RemotePath, artifact.Size, artifact.SHA256, created); err != nil {
 			return err
 		}
 	}

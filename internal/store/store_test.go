@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,5 +35,22 @@ func TestCreateExecutionCreatesAndReusesSession(t *testing.T) {
 	}
 	if got.ExecutionCount != 2 {
 		t.Fatalf("execution count = %d, want 2", got.ExecutionCount)
+	}
+}
+
+func TestMySQLURLConversion(t *testing.T) {
+	dsn, err := mysqlDSN("mysql://bridge:p%40ss@db.example/ssh_bridge?charset=utf8mb4&tls=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"bridge:p@ss@tcp(db.example:3306)/ssh_bridge", "charset=utf8mb4", "tls=true"} {
+		if !strings.Contains(dsn, expected) {
+			t.Fatalf("DSN %q does not contain %q", dsn, expected)
+		}
+	}
+	for _, invalid := range []string{"postgres://bridge@localhost/db", "mysql://localhost/db", "mysql://bridge@localhost"} {
+		if _, err := mysqlDSN(invalid); err == nil {
+			t.Fatalf("invalid MySQL URL %q was accepted", invalid)
+		}
 	}
 }

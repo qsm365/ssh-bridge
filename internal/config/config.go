@@ -10,8 +10,11 @@ import (
 )
 
 const (
-	ModeLocal  = "local"
-	ModeServer = "server"
+	ModeLocal          = "local"
+	ModeServer         = "server"
+	DatabaseSQLite     = "sqlite"
+	DatabasePostgreSQL = "postgresql"
+	DatabaseMySQL      = "mysql"
 )
 
 type Config struct {
@@ -42,6 +45,9 @@ func (c Config) Validate() error {
 	if c.Mode == ModeServer && strings.TrimSpace(c.DatabaseURL) == "" {
 		return errors.New("SSH_BRIDGE_DATABASE_URL is required in server mode")
 	}
+	if c.Mode == ModeServer && c.DatabaseName() == "" {
+		return errors.New("SSH_BRIDGE_DATABASE_URL must use postgres://, postgresql://, or mysql://")
+	}
 	if c.AgentToken == "" {
 		return errors.New("SSH_BRIDGE_AGENT_TOKEN is required")
 	}
@@ -54,8 +60,15 @@ func (c Config) Validate() error {
 func (c Config) DatabasePath() string { return filepath.Join(c.DataDir, "ssh-bridge.db") }
 func (c Config) OutputDir() string    { return filepath.Join(c.DataDir, "outputs") }
 func (c Config) DatabaseName() string {
-	if c.Mode == ModeServer {
-		return "postgresql"
+	if c.Mode != ModeServer {
+		return DatabaseSQLite
 	}
-	return "sqlite"
+	value := strings.ToLower(strings.TrimSpace(c.DatabaseURL))
+	if strings.HasPrefix(value, "postgres://") || strings.HasPrefix(value, "postgresql://") {
+		return DatabasePostgreSQL
+	}
+	if strings.HasPrefix(value, "mysql://") {
+		return DatabaseMySQL
+	}
+	return ""
 }

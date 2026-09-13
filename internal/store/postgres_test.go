@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -13,8 +14,21 @@ func TestPostgresMigrationsAndRestartRecovery(t *testing.T) {
 		t.Skip("SSH_BRIDGE_TEST_POSTGRES_URL is not set")
 	}
 
+	testExternalDatabase(t, "postgres", databaseURL, OpenPostgres)
+}
+
+func TestMySQLMigrationsAndRestartRecovery(t *testing.T) {
+	databaseURL := os.Getenv("SSH_BRIDGE_TEST_MYSQL_URL")
+	if databaseURL == "" {
+		t.Skip("SSH_BRIDGE_TEST_MYSQL_URL is not set")
+	}
+	testExternalDatabase(t, "mysql", databaseURL, OpenMySQL)
+}
+
+func testExternalDatabase(t *testing.T, databaseName, databaseURL string, opener func(string) (*Store, error)) {
+	t.Helper()
 	ctx := context.Background()
-	s, err := OpenPostgres(databaseURL)
+	s, err := opener(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,12 +37,12 @@ func TestPostgresMigrationsAndRestartRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	suffix := time.Now().UTC().Format("20060102150405.000000000")
-	target := Target{ID: "target_" + suffix, Name: "postgres-test", Host: "127.0.0.1", Port: 22, SSHUser: "root", PrivateKeyPath: "/missing", Enabled: true}
+	suffix := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+	target := Target{ID: "target_" + suffix, Name: databaseName + "-test", Host: "127.0.0.1", Port: 22, SSHUser: "root", PrivateKeyPath: "/missing", Enabled: true}
 	if err := s.SaveTarget(ctx, target); err != nil {
 		t.Fatal(err)
 	}
-	session := AgentSession{ID: "session_" + suffix, Title: "PostgreSQL test"}
+	session := AgentSession{ID: "session_" + suffix, Title: databaseName + " test"}
 	execution := Execution{ID: "execution_" + suffix, SessionID: session.ID, TargetID: target.ID, Command: "uptime", Status: "pending", CreatedAt: time.Now().UTC()}
 	if err := s.CreateExecution(ctx, session, execution, nil, true); err != nil {
 		t.Fatal(err)
@@ -40,7 +54,7 @@ func TestPostgresMigrationsAndRestartRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := OpenPostgres(databaseURL)
+	reopened, err := opener(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
