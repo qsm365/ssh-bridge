@@ -283,6 +283,7 @@ func TestSystemInfoAndReadinessReflectRuntime(t *testing.T) {
 }
 
 func TestNormalizeHostKeyFingerprint(t *testing.T) {
+	// Generated solely for this test; it does not identify or authorize any real host.
 	const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB9QHHO39SSF56xdwRYHb0wMHR4pasK/nuYhBJiyTsOn"
 	const want = "SHA256:3Vh0AdOl3sPju9a1YU655VmxpgbVzFA9hESj78keTtQ"
 	for _, input := range []string{key, "server.example " + key, want} {
