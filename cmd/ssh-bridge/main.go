@@ -47,6 +47,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer data.Close()
+	if err := data.ConfigureSecrets(cfg.DataDir); err != nil {
+		log.Fatal(err)
+	}
 
 	app := server.New(cfg, data)
 	log.Printf("SSH Bridge %s mode is available at http://%s (%s)", cfg.Mode, *listen, cfg.DatabaseName())

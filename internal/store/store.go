@@ -20,6 +20,7 @@ var ErrNotFound = errors.New("not found")
 type Store struct {
 	db      *sql.DB
 	dialect string
+	secrets *secretCipher
 }
 
 type Target struct {
@@ -28,7 +29,10 @@ type Target struct {
 	Host               string    `json:"host"`
 	Port               int       `json:"port"`
 	SSHUser            string    `json:"ssh_user"`
+	AuthMethod         string    `json:"auth_method"`
 	PrivateKeyPath     string    `json:"private_key_path,omitempty"`
+	Password           string    `json:"-"`
+	PasswordConfigured bool      `json:"password_configured"`
 	HostKeyFingerprint string    `json:"host_key_fingerprint"`
 	Description        string    `json:"description"`
 	Enabled            bool      `json:"enabled"`
@@ -230,6 +234,11 @@ var sqlitePostgresMigrations = []migration{{version: 1, statements: []string{
 )`,
 	`CREATE INDEX IF NOT EXISTS idx_executions_session_created ON executions(session_id, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_executions_created ON executions(created_at DESC)`,
+}}, {version: 2, statements: []string{
+	`ALTER TABLE targets ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'key'`,
+	`ALTER TABLE targets ADD COLUMN password_ciphertext TEXT`,
+}}, {version: 3, statements: []string{
+	`ALTER TABLE targets ADD COLUMN deleted_at TEXT`,
 }}}
 
 var mysqlMigrations = []migration{{version: 1, statements: []string{
@@ -257,6 +266,10 @@ var mysqlMigrations = []migration{{version: 1, statements: []string{
 )`,
 	`CREATE INDEX idx_executions_session_created ON executions(session_id, created_at)`,
 	`CREATE INDEX idx_executions_created ON executions(created_at DESC)`,
+}}, {version: 2, statements: []string{
+	`ALTER TABLE targets ADD COLUMN auth_method VARCHAR(20) NOT NULL DEFAULT 'key', ADD COLUMN password_ciphertext TEXT`,
+}}, {version: 3, statements: []string{
+	`ALTER TABLE targets ADD COLUMN deleted_at VARCHAR(40)`,
 }}}
 
 func (s *Store) migrations() []migration {
@@ -322,7 +335,7 @@ func parseOptional(v sql.NullString) *time.Time {
 }
 
 func (s *Store) ListTargets(ctx context.Context) ([]Target, error) {
-	rows, err := s.query(ctx, `SELECT id,name,host,port,ssh_user,private_key_path,host_key_fingerprint,description,enabled,created_at,updated_at FROM targets ORDER BY name`)
+	rows, err := s.query(ctx, `SELECT id,name,host,port,ssh_user,auth_method,private_key_path,password_ciphertext,host_key_fingerprint,description,enabled,created_at,updated_at FROM targets WHERE deleted_at IS NULL ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -331,10 +344,12 @@ func (s *Store) ListTargets(ctx context.Context) ([]Target, error) {
 	for rows.Next() {
 		var t Target
 		var enabled int
+		var ciphertext sql.NullString
 		var created, updated string
-		if err := rows.Scan(&t.ID, &t.Name, &t.Host, &t.Port, &t.SSHUser, &t.PrivateKeyPath, &t.HostKeyFingerprint, &t.Description, &enabled, &created, &updated); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Host, &t.Port, &t.SSHUser, &t.AuthMethod, &t.PrivateKeyPath, &ciphertext, &t.HostKeyFingerprint, &t.Description, &enabled, &created, &updated); err != nil {
 			return nil, err
 		}
+		t.PasswordConfigured = ciphertext.Valid && ciphertext.String != ""
 		t.Enabled = enabled != 0
 		t.CreatedAt = parseTime(created)
 		t.UpdatedAt = parseTime(updated)
@@ -346,13 +361,24 @@ func (s *Store) ListTargets(ctx context.Context) ([]Target, error) {
 func (s *Store) GetTarget(ctx context.Context, id string) (Target, error) {
 	var t Target
 	var enabled int
+	var ciphertext sql.NullString
 	var created, updated string
-	err := s.queryRow(ctx, `SELECT id,name,host,port,ssh_user,private_key_path,host_key_fingerprint,description,enabled,created_at,updated_at FROM targets WHERE id=?`, id).Scan(&t.ID, &t.Name, &t.Host, &t.Port, &t.SSHUser, &t.PrivateKeyPath, &t.HostKeyFingerprint, &t.Description, &enabled, &created, &updated)
+	err := s.queryRow(ctx, `SELECT id,name,host,port,ssh_user,auth_method,private_key_path,password_ciphertext,host_key_fingerprint,description,enabled,created_at,updated_at FROM targets WHERE id=? AND deleted_at IS NULL`, id).Scan(&t.ID, &t.Name, &t.Host, &t.Port, &t.SSHUser, &t.AuthMethod, &t.PrivateKeyPath, &ciphertext, &t.HostKeyFingerprint, &t.Description, &enabled, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return t, ErrNotFound
 	}
 	if err != nil {
 		return t, err
+	}
+	t.PasswordConfigured = ciphertext.Valid && ciphertext.String != ""
+	if t.PasswordConfigured {
+		if s.secrets == nil {
+			return t, errors.New("password encryption key is not configured")
+		}
+		t.Password, err = s.secrets.decrypt(ciphertext.String)
+		if err != nil {
+			return t, fmt.Errorf("decrypt target password: %w", err)
+		}
 	}
 	t.Enabled = enabled != 0
 	t.CreatedAt = parseTime(created)
@@ -361,13 +387,21 @@ func (s *Store) GetTarget(ctx context.Context, id string) (Target, error) {
 }
 
 func (s *Store) SaveTarget(ctx context.Context, t Target) error {
+	ciphertext, err := s.targetPasswordCiphertext(t)
+	if err != nil {
+		return err
+	}
 	now := nowText()
-	_, err := s.exec(ctx, `INSERT INTO targets(id,name,host,port,ssh_user,private_key_path,host_key_fingerprint,description,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, t.ID, t.Name, t.Host, t.Port, t.SSHUser, t.PrivateKeyPath, t.HostKeyFingerprint, t.Description, enabledValue(t.Enabled), now, now)
+	_, err = s.exec(ctx, `INSERT INTO targets(id,name,host,port,ssh_user,auth_method,private_key_path,password_ciphertext,host_key_fingerprint,description,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, t.ID, t.Name, t.Host, t.Port, t.SSHUser, targetAuthMethod(t), t.PrivateKeyPath, ciphertext, t.HostKeyFingerprint, t.Description, enabledValue(t.Enabled), now, now)
 	return err
 }
 
 func (s *Store) UpdateTarget(ctx context.Context, t Target) error {
-	r, err := s.exec(ctx, `UPDATE targets SET name=?,host=?,port=?,ssh_user=?,private_key_path=?,host_key_fingerprint=?,description=?,enabled=?,updated_at=? WHERE id=?`, t.Name, t.Host, t.Port, t.SSHUser, t.PrivateKeyPath, t.HostKeyFingerprint, t.Description, enabledValue(t.Enabled), nowText(), t.ID)
+	ciphertext, err := s.targetPasswordCiphertext(t)
+	if err != nil {
+		return err
+	}
+	r, err := s.exec(ctx, `UPDATE targets SET name=?,host=?,port=?,ssh_user=?,auth_method=?,private_key_path=?,password_ciphertext=?,host_key_fingerprint=?,description=?,enabled=?,updated_at=? WHERE id=? AND deleted_at IS NULL`, t.Name, t.Host, t.Port, t.SSHUser, targetAuthMethod(t), t.PrivateKeyPath, ciphertext, t.HostKeyFingerprint, t.Description, enabledValue(t.Enabled), nowText(), t.ID)
 	if err != nil {
 		return err
 	}
@@ -376,6 +410,39 @@ func (s *Store) UpdateTarget(ctx context.Context, t Target) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *Store) DeleteTarget(ctx context.Context, id string) error {
+	now := nowText()
+	r, err := s.exec(ctx, `UPDATE targets SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL`, now, now, id)
+	if err != nil {
+		return err
+	}
+	count, err := r.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func targetAuthMethod(t Target) string {
+	if t.AuthMethod == "password" {
+		return "password"
+	}
+	return "key"
+}
+
+func (s *Store) targetPasswordCiphertext(t Target) (any, error) {
+	if targetAuthMethod(t) != "password" {
+		return nil, nil
+	}
+	if s.secrets == nil {
+		return nil, errors.New("password encryption key is not configured")
+	}
+	return s.secrets.encrypt(t.Password)
 }
 
 func (s *Store) CreateExecution(ctx context.Context, session AgentSession, e Execution, artifacts []Artifact, createSession bool) error {

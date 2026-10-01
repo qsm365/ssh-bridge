@@ -127,10 +127,11 @@
       },
       "TargetSummary": {
         "type": "object",
-        "required": ["id", "name", "description"],
+        "required": ["id", "name", "ssh_user", "description"],
         "properties": {
           "id": { "type": "string" },
           "name": { "type": "string" },
+          "ssh_user": { "type": "string" },
           "description": { "type": "string" }
         }
       },

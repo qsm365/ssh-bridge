@@ -61,6 +61,15 @@ func TestMCPToolsAndExecutionLifecycle(t *testing.T) {
 	if annotations["list_targets"]["readOnlyHint"] != true || annotations["execute_command"]["readOnlyHint"] != false {
 		t.Fatalf("unexpected tool annotations: %+v", annotations)
 	}
+	targets := structuredMap(t, callMCP(t, ts.URL, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_targets","arguments":{}}}`))
+	items, ok := targets["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("unexpected MCP target list: %+v", targets)
+	}
+	summary := items[0].(map[string]any)
+	if summary["ssh_user"] != "root" || summary["id"] != "target_test" || summary["private_key_path"] != nil || summary["password"] != nil {
+		t.Fatalf("unexpected MCP target summary: %+v", summary)
+	}
 
 	encoded := base64.StdEncoding.EncodeToString([]byte("SELECT 1;\n"))
 	executeBody := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"execute_command","arguments":{"target_id":"target_test","session_title":"MCP session","title":"MCP execution","command":"cat {{file:sql}}","files":[{"name":"sql","filename":"query.sql","content_base64":"` + encoded + `"}]}}}`

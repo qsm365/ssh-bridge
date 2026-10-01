@@ -18,7 +18,7 @@ MCP 使用与 HTTP API 相同的 Bearer Token。服务采用无状态协议，�
 
 提供以下工具：
 
-- `list_targets`：获取不含 SSH 凭据的可用目标主机。
+- `list_targets`：获取可用目标主机的 ID、名称、SSH 用户名和说明，不返回密码或私钥。
 - `execute_command`：异步发起命令并返回会话 ID、执行 ID 和 `pending` 状态。
 - `get_execution`：在请求中断后查询状态和输出预览。
 - `wait_execution`：长等待执行结果，最长 60 秒。
@@ -30,7 +30,7 @@ MCP 使用与 HTTP API 相同的 Bearer Token。服务采用无状态协议，�
 
 ## 推荐调用流程
 
-1. 调用 `list_targets` 获取已启用的 `target_id`。响应不会包含本机私钥路径或 Host Key 等管理配置。
+1. 调用 `list_targets` 获取已启用的 `target_id` 和 `ssh_user`，可用用户名区分同名主机。响应不会包含密码、私钥路径或 Host Key 等管理配置。
 2. 调用 `execute_command`。一次 Agent 对话的第一次调用不传 `session_id`，保存响应中的 `session_id` 和 `execution_id`。
 3. 调用 `wait_execution` 一次，通常会直接获得最终结果。若仍为 `pending` 或 `running`，可继续等待或稍后查询。
 4. 请求中断后调用 `get_execution`，并同时提供之前保存的会话 ID 和执行 ID。

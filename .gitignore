@@ -4,4 +4,5 @@ web/*.tsbuildinfo
 .codex/
 /ssh-bridge
 ssh-bridge-data/
+target-password.key
 .DS_Store

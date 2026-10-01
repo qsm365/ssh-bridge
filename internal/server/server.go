@@ -93,6 +93,7 @@ func New(cfg config.Config, data *store.Store) *http.Server {
 	mux.HandleFunc("POST /api/v1/targets/test", a.admin(a.testTargetInput))
 	mux.HandleFunc("POST /api/v1/targets/{id}/test", a.admin(a.testSavedTarget))
 	mux.HandleFunc("PUT /api/v1/targets/{id}", a.admin(a.updateTarget))
+	mux.HandleFunc("DELETE /api/v1/targets/{id}", a.admin(a.deleteTarget))
 	mux.HandleFunc("GET /api/v1/sessions", a.admin(a.listSessions))
 	mux.HandleFunc("GET /api/v1/sessions/{id}", a.admin(a.getSession))
 	mux.HandleFunc("GET /api/v1/executions", a.admin(a.listExecutions))
@@ -196,7 +197,10 @@ type targetRequest struct {
 	Host               string `json:"host"`
 	Port               int    `json:"port"`
 	SSHUser            string `json:"ssh_user"`
+	AuthMethod         string `json:"auth_method"`
 	PrivateKeyPath     string `json:"private_key_path"`
+	Password           string `json:"password"`
+	ExistingTargetID   string `json:"existing_target_id"`
 	HostKeyFingerprint string `json:"host_key_fingerprint"`
 	Description        string `json:"description"`
 	Enabled            *bool  `json:"enabled"`
@@ -219,7 +223,14 @@ func validateTargetConnection(r targetRequest) string {
 	if strings.TrimSpace(r.SSHUser) == "" {
 		return "ssh_user is required"
 	}
-	if strings.TrimSpace(r.PrivateKeyPath) == "" {
+	if r.AuthMethod != "" && r.AuthMethod != "key" && r.AuthMethod != "password" {
+		return "auth_method must be key or password"
+	}
+	if r.AuthMethod == "password" {
+		if r.Password == "" {
+			return "password is required"
+		}
+	} else if strings.TrimSpace(r.PrivateKeyPath) == "" {
 		return "private_key_path is required"
 	}
 	if strings.TrimSpace(r.HostKeyFingerprint) != "" {
@@ -261,7 +272,23 @@ func requestTarget(req targetRequest) store.Target {
 		enabled = *req.Enabled
 	}
 	fingerprint, _ := normalizeHostKeyFingerprint(req.HostKeyFingerprint)
-	return store.Target{Name: strings.TrimSpace(req.Name), Host: strings.TrimSpace(req.Host), Port: req.Port, SSHUser: strings.TrimSpace(req.SSHUser), PrivateKeyPath: strings.TrimSpace(req.PrivateKeyPath), HostKeyFingerprint: fingerprint, Description: strings.TrimSpace(req.Description), Enabled: enabled}
+	method := req.AuthMethod
+	if method == "" {
+		method = "key"
+	}
+	t := store.Target{Name: strings.TrimSpace(req.Name), Host: strings.TrimSpace(req.Host), Port: req.Port, SSHUser: strings.TrimSpace(req.SSHUser), AuthMethod: method, HostKeyFingerprint: fingerprint, Description: strings.TrimSpace(req.Description), Enabled: enabled}
+	if method == "password" {
+		t.Password = req.Password
+	} else {
+		t.PrivateKeyPath = strings.TrimSpace(req.PrivateKeyPath)
+	}
+	return t
+}
+
+func preserveTargetPassword(req *targetRequest, existing store.Target) {
+	if req.AuthMethod == "password" && req.Password == "" && existing.AuthMethod == "password" {
+		req.Password = existing.Password
+	}
 }
 func (a *App) listTargets(w http.ResponseWriter, r *http.Request) {
 	items, err := a.store.ListTargets(r.Context())
@@ -283,7 +310,7 @@ func (a *App) listAgentTargets(w http.ResponseWriter, r *http.Request) {
 		if !target.Enabled {
 			continue
 		}
-		items = append(items, map[string]any{"id": target.ID, "name": target.Name, "description": target.Description})
+		items = append(items, map[string]any{"id": target.ID, "name": target.Name, "ssh_user": target.SSHUser, "description": target.Description})
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -317,6 +344,16 @@ func (a *App) updateTarget(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 400, "invalid request")
 		return
 	}
+	existing, err := a.store.GetTarget(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		apiError(w, 404, "target not found")
+		return
+	}
+	if err != nil {
+		apiError(w, 500, err.Error())
+		return
+	}
+	preserveTargetPassword(&req, existing)
 	if msg := validateTarget(req); msg != "" {
 		apiError(w, 400, msg)
 		return
@@ -334,11 +371,36 @@ func (a *App) updateTarget(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 200, saved)
 }
 
+func (a *App) deleteTarget(w http.ResponseWriter, r *http.Request) {
+	err := a.store.DeleteTarget(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		apiError(w, http.StatusNotFound, "target not found")
+		return
+	}
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (a *App) testTargetInput(w http.ResponseWriter, r *http.Request) {
 	var req targetRequest
 	if err := decode(w, r, &req); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid request")
 		return
+	}
+	if req.ExistingTargetID != "" {
+		existing, err := a.store.GetTarget(r.Context(), req.ExistingTargetID)
+		if errors.Is(err, store.ErrNotFound) {
+			apiError(w, http.StatusNotFound, "target not found")
+			return
+		}
+		if err != nil {
+			apiError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		preserveTargetPassword(&req, existing)
 	}
 	if message := validateTargetConnection(req); message != "" {
 		apiError(w, http.StatusBadRequest, message)

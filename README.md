@@ -6,7 +6,8 @@
 
 - localhost 管理页面默认以本机管理员身份打开，无需登录
 - 首次启动自动生成 Agent Token，并在“Agent 接入”页面提供一次性展示和重新生成功能
-- 目标主机管理（私钥文件、可选的 Host Key 指纹校验）
+- 目标主机管理（私钥或用户名 + 密码认证、可选的 Host Key 指纹校验）
+- 目标主机可逻辑删除；删除后不再允许新执行，历史执行记录仍保留原主机关联
 - 保存前及保存后的 SSH 登录联通性测试（不执行远程命令）
 - Agent Bearer Token 鉴权
 - 内置 OpenAPI 3.1 文档，以及不暴露私钥路径等管理信息的 Agent 目标主机列表
@@ -129,10 +130,11 @@ curl -X POST http://127.0.0.1:7408/api/v1/executions \
 默认数据目录为 `./ssh-bridge-data`：
 
 - `ssh-bridge.db`：目标主机、会话、执行元数据和短输出预览
+- `target-password.key`：加密 SSH 密码的本地密钥，仅服务进程可读；Server 模式也保存在此目录
 - `outputs/YYYY/MM/DD/{execution_id}/output.jsonl`：按时间顺序归档的 stdout/stderr 输出块
 - `artifacts/YYYY/MM/DD/{execution_id}/`：执行时上传的输入文件
 
-私钥只读取管理员配置的本机路径，不写入数据库内容或输出文件。
+私钥只读取管理员配置的服务端路径，不写入数据库内容或输出文件。SSH 密码在数据库中使用 AES-GCM 加密，管理接口不会返回明文；编辑密码主机时留空表示保留原密码。`target-password.key` 必须与数据库一起备份，丢失后已保存的密码无法恢复。Host Key 留空时仍不校验，建议在可用时配置。
 
 ## 升级与备份
 

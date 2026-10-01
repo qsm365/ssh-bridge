@@ -15,6 +15,7 @@ export const api = {
   targets: () => request<{ items: Target[] }>('/targets'),
   createTarget: (body: object) => request<Target>('/targets', { method: 'POST', body: JSON.stringify(body) }),
   updateTarget: (id: string, body: object) => request<Target>(`/targets/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  deleteTarget: (id: string) => request<void>(`/targets/${id}`, { method: 'DELETE' }),
   testTarget: (body: object) => request<ConnectionTest>('/targets/test', { method: 'POST', body: JSON.stringify(body) }),
   testSavedTarget: (id: string) => request<ConnectionTest>(`/targets/${id}/test`, { method: 'POST' }),
   sessions: () => request<{ items: AuditSession[] }>('/sessions'),

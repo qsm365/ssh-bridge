@@ -195,7 +195,7 @@ func mcpTools() []mcpTool {
 	readOnly := map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
 	sshWrite := map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true}
 	return []mcpTool{
-		{Name: "list_targets", Title: "列出目标主机", Description: "列出当前允许 Agent 使用的目标主机，不返回 SSH 凭据。", InputSchema: objectSchema(map[string]any{}), Annotations: readOnly},
+		{Name: "list_targets", Title: "列出目标主机", Description: "列出当前允许 Agent 使用的目标主机及 SSH 用户名，不返回密码或私钥。", InputSchema: objectSchema(map[string]any{}), Annotations: readOnly},
 		{Name: "execute_command", Title: "执行 SSH 命令", Description: "异步发起 SSH 命令。首次调用不传 session_id；后续同一对话复用返回的 session_id。文件只能通过 {{file:name}} 占位符引用。", InputSchema: objectSchema(map[string]any{
 			"session_id": stringProperty("已有的 SSH Bridge 会话 ID，可选"), "target_id": stringProperty("目标主机 ID"),
 			"session_title": stringProperty("会话标题，可选"), "title": stringProperty("本次执行标题，可选"),
@@ -245,7 +245,7 @@ func (a *App) callMCPTool(ctx context.Context, call mcpToolCall) (any, error) {
 		items := make([]map[string]any, 0, len(targets))
 		for _, target := range targets {
 			if target.Enabled {
-				items = append(items, map[string]any{"id": target.ID, "name": target.Name, "description": target.Description})
+				items = append(items, map[string]any{"id": target.ID, "name": target.Name, "ssh_user": target.SSHUser, "description": target.Description})
 			}
 		}
 		return map[string]any{"items": items}, nil

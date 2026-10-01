@@ -36,7 +36,9 @@ export interface Target {
   host: string
   port: number
   ssh_user: string
+  auth_method: 'key' | 'password'
   private_key_path?: string
+  password_configured: boolean
   host_key_fingerprint: string
   description: string
   enabled: boolean

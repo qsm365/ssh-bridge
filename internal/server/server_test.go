@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -63,7 +64,7 @@ func TestExecutionLifecycleReturnsRecoverableIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(agentTargetsBody, []byte(target.ID)) || bytes.Contains(agentTargetsBody, []byte("private_key_path")) {
+	if !bytes.Contains(agentTargetsBody, []byte(target.ID)) || !bytes.Contains(agentTargetsBody, []byte(`"ssh_user":"root"`)) || bytes.Contains(agentTargetsBody, []byte("private_key_path")) {
 		t.Fatalf("unexpected Agent target response: %s", agentTargetsBody)
 	}
 	updateBody := bytes.NewBufferString(`{"name":"test-updated","host":"127.0.0.1","port":22,"ssh_user":"root","private_key_path":"/definitely/missing","host_key_fingerprint":"","description":"updated","enabled":true}`)
@@ -210,6 +211,149 @@ func TestExecutionLifecycleReturnsRecoverableIDs(t *testing.T) {
 	}
 	if string(downloaded) != "SELECT 1;\n" {
 		t.Fatalf("downloaded artifact = %q", downloaded)
+	}
+}
+
+func TestPasswordTargetAPINeverReturnsPassword(t *testing.T) {
+	dir := t.TempDir()
+	data, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	if err := data.ConfigureSecrets(dir); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(config.Config{DataDir: dir}, data).Handler)
+	defer ts.Close()
+	create := `{"name":"test","host":"127.0.0.1","port":22,"ssh_user":"operator","auth_method":"password","password":"example-secret"}`
+	response, err := http.Post(ts.URL+"/api/v1/targets", "application/json", bytes.NewBufferString(create))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create status: %d", response.StatusCode)
+	}
+	createBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(createBody, []byte("example-secret")) {
+		t.Fatal("password leaked in create response")
+	}
+	var created store.Target
+	if err := json.Unmarshal(createBody, &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.AuthMethod != "password" || !created.PasswordConfigured {
+		t.Fatal("password target not configured")
+	}
+	update := `{"name":"renamed","host":"127.0.0.1","port":22,"ssh_user":"operator","auth_method":"password","password":""}`
+	request, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/targets/"+created.ID, bytes.NewBufferString(update))
+	request.Header.Set("Content-Type", "application/json")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("update status: %d", response.StatusCode)
+	}
+	got, err := data.GetTarget(context.Background(), created.ID)
+	if err != nil || got.Password != "example-secret" {
+		t.Fatalf("password not preserved on edit: %v", err)
+	}
+	response, err = http.Get(ts.URL + "/api/v1/targets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	listBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(listBody, []byte("example-secret")) {
+		t.Fatal("password leaked in list response")
+	}
+}
+
+func TestDeleteTargetHidesAgentAccessAndKeepsAudit(t *testing.T) {
+	dir := t.TempDir()
+	data, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	target := store.Target{ID: "target_delete_api", Name: "historical host", Host: "127.0.0.1", Port: 22, SSHUser: "operator", PrivateKeyPath: "/missing", Enabled: true}
+	if err := data.SaveTarget(context.Background(), target); err != nil {
+		t.Fatal(err)
+	}
+	execution := store.Execution{ID: "execution_delete_api", SessionID: "session_delete_api", TargetID: target.ID, Command: "uptime", Status: "failed", CreatedAt: time.Now().UTC()}
+	if err := data.CreateExecution(context.Background(), store.AgentSession{ID: execution.SessionID}, execution, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(config.Config{DataDir: dir, AgentToken: "test-token"}, data).Handler)
+	defer ts.Close()
+	request, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/v1/targets/"+target.ID, nil)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status: %d", response.StatusCode)
+	}
+	response, err = http.Get(ts.URL + "/api/v1/targets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var listed struct {
+		Items []store.Target `json:"items"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Items) != 0 {
+		t.Fatal("deleted target remains in admin list")
+	}
+	request, _ = http.NewRequest(http.MethodGet, ts.URL+"/api/v1/agent/targets", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var agentListed struct {
+		Items []store.Target `json:"items"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&agentListed); err != nil {
+		t.Fatal(err)
+	}
+	if len(agentListed.Items) != 0 {
+		t.Fatal("deleted target remains in Agent list")
+	}
+	request, _ = http.NewRequest(http.MethodPost, ts.URL+"/api/v1/executions", bytes.NewBufferString(`{"target_id":"target_delete_api","command":"uptime"}`))
+	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Content-Type", "application/json")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("deleted target execution status: %d", response.StatusCode)
+	}
+	request, _ = http.NewRequest(http.MethodGet, ts.URL+"/api/v1/sessions/"+execution.SessionID+"/executions/"+execution.ID, nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("historical execution status: %d", response.StatusCode)
 	}
 }
 
