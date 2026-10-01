@@ -22,7 +22,7 @@
 - `local` / `server` 双模式，以及 SQLite / PostgreSQL / MySQL 编号数据库迁移
 - `/readyz` 数据库就绪检查和动态运行模式标识
 
-Server 模式已提供具名凭据管理页面及 Docker 开发部署示例。初版暂不包含审批、记录清理、SSO 和 S3；完整回归与生产部署文档仍在后续阶段。
+Server 模式已提供具名凭据管理页面及 Docker 开发部署示例。初版暂不包含审批、记录清理、SSO 和 S3。
 
 ## 构建与运行
 
@@ -148,10 +148,12 @@ curl -X POST http://127.0.0.1:7408/api/v1/executions \
 
 ## 升级与备份
 
-升级前先停止 SSH Bridge，并备份整个数据目录。数据目录中可能存在 SQLite WAL 文件，只复制 `ssh-bridge.db` 不能保证得到一致的备份。
+Local 模式升级前先停止 SSH Bridge，并备份整个数据目录。数据目录中可能存在 SQLite WAL 文件，只复制 `ssh-bridge.db` 不能保证得到一致的备份。
 
 ```bash
 cp -R ./ssh-bridge-data ./ssh-bridge-data.backup
 ```
 
-备份包含 Agent Token、主机连接配置、执行记录、完整输出和上传文件，应按照敏感数据保存。升级时用新版可执行文件替换旧文件，然后继续指定原来的 `--data-dir` 启动；启动后检查 `/healthz`，并通过管理页面确认目标主机和历史会话可以正常读取。
+备份包含 Agent Token、主机连接配置、执行记录、完整输出和上传文件，应按照敏感数据保存。升级时用新版可执行文件替换旧文件，然后继续指定原来的 `--data-dir` 启动；启动后检查 `/readyz`，并通过管理页面确认目标主机和历史会话可以正常读取。
+
+Server 模式必须同时备份外部数据库和 `/data`，并在数据库备份期间暂停 Bridge 写入；升级、迁移和恢复步骤见 [Server Docker 说明](deploy/server/README.md)。

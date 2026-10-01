@@ -25,3 +25,27 @@ Compose 会把 `SSH_BRIDGE_POSTGRES_PASSWORD` 拼入数据库 URL，请使用字
 ```bash
 docker compose -f deploy/server/compose.yaml down
 ```
+
+## 生产接入与升级
+
+Compose 是单实例开发验收配置，默认仅绑定宿主机回环地址。生产环境应由 HTTPS 反向代理接入，将原始 `Host` 头转发给 Bridge，并设置 `SSH_BRIDGE_COOKIE_SECURE=true`；只允许受信网络访问数据库和 Bridge 的内部端口。`/healthz` 表示进程可响应，`/readyz` 会检查数据库连接。若采用 MySQL，使用 `SSH_BRIDGE_DATABASE_URL` 的 MySQL DSN 启动独立 Server 实例；示例 Compose 仅提供 PostgreSQL。
+
+每次升级先安排短暂停机，停止 Bridge 写入，再对数据库做一致性备份，并完整备份 `/data`（尤其是 `target-password.key`、执行输出和上传归档）。数据库与 `/data` 是同一份审计数据的两部分，恢复时应使用同一备份时间点；不要只备份数据库或只保存容器镜像。SSH 私钥也应通过独立的安全渠道备份，勿放进数据卷快照或 Git。备份中包含敏感命令、输出和连接信息，应限制访问并验证可恢复性。
+
+PostgreSQL Compose 环境可按以下顺序操作；请将备份文件写入受控目录，不要把密码或备份提交到仓库：
+
+```bash
+# 在仓库根目录；先停止 Bridge，保留 PostgreSQL 和具名卷。
+docker compose -f deploy/server/compose.yaml stop bridge
+# 将输出重定向到已创建、仅管理员可读的备份目录。
+docker compose -f deploy/server/compose.yaml exec -T postgres \
+  pg_dump -U ssh_bridge -Fc ssh_bridge > /secure/backup/ssh-bridge.pgdump
+docker compose -f deploy/server/compose.yaml cp \
+  bridge:/data/. /secure/backup/data/
+# 不要执行 docker compose down -v。
+# 更新代码或镜像后：
+docker compose -f deploy/server/compose.yaml up --build -d
+docker compose -f deploy/server/compose.yaml ps
+```
+
+服务启动时会按编号执行未应用的数据库迁移，并记录到 `schema_migrations`；不提供自动降级迁移。升级前检查目标版本和备份，升级后确认 `/readyz`、管理员登录、授权目标列表和一条历史执行输出；异常时先停服务，再恢复匹配的数据库与 `/data` 备份，然后运行原版本。MySQL 部署同样遵循此顺序，数据库备份工具改用对应的 MySQL 客户端。不要在运行中的服务上单独恢复数据库或删除卷。

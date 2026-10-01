@@ -68,6 +68,11 @@ func TestPasswordSSHConnection(t *testing.T) {
 								continue
 							}
 							request.Reply(true, nil)
+							var execRequest struct{ Command string }
+							if err := ssh.Unmarshal(request.Payload, &execRequest); err == nil && execRequest.Command == "sleep-for-timeout-test" {
+								<-time.After(time.Second)
+								return
+							}
 							active.Write([]byte("command output\n"))
 							active.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 							return
@@ -88,6 +93,11 @@ func TestPasswordSSHConnection(t *testing.T) {
 	status, exitCode, message := runner.runSSH(context.Background(), store.Execution{Command: "echo test"}, target, nil, writer)
 	if status != "succeeded" || exitCode == nil || *exitCode != 0 || message != "" || !bytes.Contains([]byte(writer.preview.String()), []byte("command output")) {
 		t.Fatalf("password command failed: status=%s, exit=%v, message=%s", status, exitCode, message)
+	}
+	timeoutRunner := Runner{Timeout: 200 * time.Millisecond}
+	status, exitCode, message = timeoutRunner.runSSH(context.Background(), store.Execution{Command: "sleep-for-timeout-test"}, target, nil, writer)
+	if status != "timeout" || exitCode != nil || message == "" {
+		t.Fatalf("password command timeout: status=%s, exit=%v, message=%s", status, exitCode, message)
 	}
 	target.Password = "wrong-password"
 	if err := TestConnection(context.Background(), target, 3*time.Second); err == nil {
