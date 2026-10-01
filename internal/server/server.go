@@ -271,6 +271,13 @@ func validateTargetConnection(r targetRequest) string {
 	return ""
 }
 
+func (a *App) validateServerKeyPath(r targetRequest) string {
+	if a.cfg.Mode == config.ModeServer && r.AuthMethod != "password" && !filepath.IsAbs(strings.TrimSpace(r.PrivateKeyPath)) {
+		return "private_key_path must be an absolute path on the server"
+	}
+	return ""
+}
+
 func normalizeHostKeyFingerprint(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -364,6 +371,10 @@ func (a *App) createTarget(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 400, msg)
 		return
 	}
+	if msg := a.validateServerKeyPath(req); msg != "" {
+		apiError(w, 400, msg)
+		return
+	}
 	t := requestTarget(req)
 	var err error
 	t.ID, err = id.New("target")
@@ -395,6 +406,10 @@ func (a *App) updateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	preserveTargetPassword(&req, existing)
 	if msg := validateTarget(req); msg != "" {
+		apiError(w, 400, msg)
+		return
+	}
+	if msg := a.validateServerKeyPath(req); msg != "" {
 		apiError(w, 400, msg)
 		return
 	}
@@ -443,6 +458,10 @@ func (a *App) testTargetInput(w http.ResponseWriter, r *http.Request) {
 		preserveTargetPassword(&req, existing)
 	}
 	if message := validateTargetConnection(req); message != "" {
+		apiError(w, http.StatusBadRequest, message)
+		return
+	}
+	if message := a.validateServerKeyPath(req); message != "" {
 		apiError(w, http.StatusBadRequest, message)
 		return
 	}

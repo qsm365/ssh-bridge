@@ -18,8 +18,8 @@ onMounted(async () => {
 })
 
 const modeTitle = computed(() => systemInfo.value.mode === 'server' ? '服务端模式' : '本地模式')
-const modeBadge = computed(() => systemInfo.value.mode.toUpperCase())
 const databaseLabel = computed(() => ({ sqlite: 'SQLite', postgresql: 'PostgreSQL', mysql: 'MySQL' })[systemInfo.value.database])
+const modeBadge = computed(() => `${systemInfo.value.mode.toUpperCase()} · ${databaseLabel.value}`)
 const modeStorage = computed(() => `${databaseLabel.value} · 本地文件`)
 
 const pageTitle = computed(() => {

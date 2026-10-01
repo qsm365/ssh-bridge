@@ -6,3 +6,5 @@ web/*.tsbuildinfo
 ssh-bridge-data/
 target-password.key
 .DS_Store
+**/.env
+**/ssh-keys/

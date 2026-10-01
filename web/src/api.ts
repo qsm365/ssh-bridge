@@ -30,10 +30,17 @@ export const api = {
   execution: (sessionId: string, executionId: string) => request<Execution>(`/sessions/${sessionId}/executions/${executionId}`),
   agentToken: () => request<AgentTokenInfo>('/agent-token'),
   regenerateAgentToken: () => request<AgentTokenInfo>('/agent-token/regenerate', { method: 'POST' }),
+  agentCredentials: () => request<{ items: AgentCredential[] }>('/agent-credentials'),
+  createAgentCredential: (body: AgentCredentialInput) => request<AgentCredentialIssued>('/agent-credentials', { method: 'POST', body: JSON.stringify(body) }),
+  updateAgentCredential: (id: string, body: AgentCredentialInput) => request<AgentCredential>(`/agent-credentials/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  regenerateAgentCredential: (id: string) => request<AgentCredentialIssued>(`/agent-credentials/${id}/regenerate`, { method: 'POST' }),
 }
 
 export interface ConnectionTest { success: boolean; duration_ms: number; message: string }
 export interface AgentTokenInfo { configured: boolean; token: string; token_visible: boolean; mcp_url: string }
+export interface AgentCredential { id: string; name: string; token_prefix: string; enabled: boolean; target_ids: string[]; created_at: string; updated_at: string; last_used_at?: string }
+export interface AgentCredentialInput { name: string; target_ids: string[]; enabled: boolean }
+export interface AgentCredentialIssued { id?: string; name?: string; token: string; token_prefix: string }
 export interface SystemInfo { mode: 'local' | 'server'; database: 'sqlite' | 'postgresql' | 'mysql'; mock: boolean; openapi_url: string; mcp_url: string }
 
 export function formatTime(value: string | null) {

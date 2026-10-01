@@ -1,0 +1,47 @@
+services:
+  bridge:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        NPM_REGISTRY: ${SSH_BRIDGE_NPM_REGISTRY:-https://registry.npmjs.org}
+        GOPROXY: ${SSH_BRIDGE_GOPROXY:-https://proxy.golang.org,direct}
+    image: ssh-bridge:server-dev
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${SSH_BRIDGE_PORT:-7408}:7408"
+    environment:
+      SSH_BRIDGE_DATABASE_URL: "postgres://ssh_bridge:${SSH_BRIDGE_POSTGRES_PASSWORD:?set SSH_BRIDGE_POSTGRES_PASSWORD}@postgres:5432/ssh_bridge?sslmode=disable"
+      SSH_BRIDGE_ADMIN_PASSWORD: ${SSH_BRIDGE_ADMIN_PASSWORD:?set SSH_BRIDGE_ADMIN_PASSWORD}
+      SSH_BRIDGE_COOKIE_SECURE: ${SSH_BRIDGE_COOKIE_SECURE:-true}
+    volumes:
+      - bridge_data:/data
+      - ${SSH_BRIDGE_SSH_KEYS_DIR:?set SSH_BRIDGE_SSH_KEYS_DIR}:/run/ssh-keys:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ssh-bridge", "--check-ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ssh_bridge
+      POSTGRES_USER: ssh_bridge
+      POSTGRES_PASSWORD: ${SSH_BRIDGE_POSTGRES_PASSWORD:?set SSH_BRIDGE_POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ssh_bridge -d ssh_bridge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  bridge_data:
+  postgres_data:

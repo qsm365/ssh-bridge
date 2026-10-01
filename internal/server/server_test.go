@@ -16,6 +16,21 @@ import (
 	"ssh-bridge/internal/store"
 )
 
+func TestServerKeyPathMustBeAbsolute(t *testing.T) {
+	request := targetRequest{AuthMethod: "key", PrivateKeyPath: "keys/id_ed25519"}
+	if got := (&App{cfg: config.Config{Mode: config.ModeServer}}).validateServerKeyPath(request); got == "" {
+		t.Fatal("relative server key path was accepted")
+	}
+	request.PrivateKeyPath = "/run/ssh-keys/id_ed25519"
+	if got := (&App{cfg: config.Config{Mode: config.ModeServer}}).validateServerKeyPath(request); got != "" {
+		t.Fatalf("absolute server key path rejected: %s", got)
+	}
+	request.PrivateKeyPath = "keys/id_ed25519"
+	if got := (&App{cfg: config.Config{Mode: config.ModeLocal}}).validateServerKeyPath(request); got != "" {
+		t.Fatalf("local key path unexpectedly rejected: %s", got)
+	}
+}
+
 func TestExecutionLifecycleReturnsRecoverableIDs(t *testing.T) {
 	dir := t.TempDir()
 	data, err := store.Open(filepath.Join(dir, "test.db"))

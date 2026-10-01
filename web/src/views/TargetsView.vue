@@ -16,6 +16,7 @@ const testingTarget = ref('')
 const deletingTarget = ref('')
 const savedTests = ref<Record<string, ConnectionTest>>({})
 const form = ref(emptyForm())
+const serverMode = ref(false)
 
 function targetPayload() { return { ...form.value, private_key_path:form.value.auth_method==='key'?form.value.private_key_path:undefined, password:form.value.auth_method==='password'?form.value.password:undefined } }
 
@@ -52,7 +53,7 @@ async function deleteTarget(target:Target) {
   catch(cause){error.value=cause instanceof Error?cause.message:'删除失败'}
   finally{deletingTarget.value=''}
 }
-onMounted(load)
+onMounted(async () => { try { serverMode.value = (await api.systemInfo()).mode === 'server' } catch { /* load still reports service errors */ }; await load() })
 </script>
 
 <template>
@@ -76,7 +77,7 @@ onMounted(load)
         <label><span>主机地址</span><input v-model="form.host" placeholder="10.0.1.20" required /></label><label><span>SSH 端口</span><input v-model.number="form.port" type="number" required /></label>
         <label class="full"><span>SSH 用户</span><input v-model="form.ssh_user" placeholder="ai-operator" required /></label>
         <label class="full"><span>认证方式</span><select v-model="form.auth_method"><option value="key">私钥</option><option value="password">用户名 + 密码</option></select></label>
-        <label v-if="form.auth_method==='key'" class="full"><span>服务端私钥路径</span><input v-model="form.private_key_path" placeholder="/Users/me/.ssh/id_ed25519" required /></label>
+        <label v-if="form.auth_method==='key'" class="full"><span>{{ serverMode ? '服务端私钥绝对路径' : '本机私钥路径' }}</span><input v-model="form.private_key_path" :placeholder="serverMode ? '/run/ssh-keys/id_ed25519' : '/Users/me/.ssh/id_ed25519'" :pattern="serverMode ? '/.*' : undefined" required /><small v-if="serverMode">填写 SSH Bridge 服务端或容器内的绝对路径；Docker 部署建议只读挂载到 /run/ssh-keys。</small></label>
         <label v-else class="full"><span>SSH 密码</span><input v-model="form.password" type="password" autocomplete="new-password" :required="!editingId || !targets.find(t=>t.id===editingId)?.password_configured" :placeholder="editingId?'留空则保留原密码':'输入 SSH 密码'" /><small v-if="editingId">留空则保留原密码；密码不会在页面中回显。</small></label>
         <label class="full"><span>主机说明</span><input v-model="form.description" placeholder="这台主机的用途" /></label>
         <label class="full"><span>Host Key（可选）</span><textarea v-model="form.host_key_fingerprint" placeholder="可直接粘贴 ~/.ssh/known_hosts 中对应主机的完整一行"></textarea><small>留空时不校验；填写后支持 known_hosts 完整记录、公钥或 SHA256 指纹，并在连接时严格校验。</small></label>

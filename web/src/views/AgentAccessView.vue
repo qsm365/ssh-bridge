@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import type { AgentTokenInfo } from '../api'
+import ServerCredentials from '../components/ServerCredentials.vue'
 
 const info = ref<AgentTokenInfo | null>(null)
 const loading = ref(true)
@@ -55,7 +56,7 @@ onMounted(load)
   </section>
 
   <div v-if="loading" class="panel empty-state">正在加载…</div>
-  <div v-else-if="serverMode" class="panel empty-state">具名凭据管理接口已可用；创建、授权与轮换的页面将在下一阶段加入。当前可通过管理 API 验收。</div>
+  <ServerCredentials v-else-if="serverMode" />
   <p v-else-if="error && !info" class="form-error panel">{{ error }}</p>
   <div v-else-if="info" class="access-layout">
     <section class="panel access-section">

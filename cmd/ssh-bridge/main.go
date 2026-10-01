@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,10 +15,23 @@ import (
 )
 
 func main() {
+	checkReady := flag.Bool("check-ready", false, "check the local service readiness")
 	mode := flag.String("mode", config.ModeLocal, "run mode: local or server")
 	listen := flag.String("listen", "127.0.0.1:7408", "HTTP listen address")
 	dataDir := flag.String("data-dir", "./ssh-bridge-data", "local data directory")
 	flag.Parse()
+	if *checkReady {
+		client := http.Client{Timeout: 3 * time.Second}
+		response, err := client.Get("http://127.0.0.1:7408/readyz")
+		if err != nil {
+			log.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			log.Fatalf("readyz returned HTTP %d", response.StatusCode)
+		}
+		return
+	}
 	if err := os.MkdirAll(filepath.Clean(*dataDir), 0o700); err != nil {
 		log.Fatal(err)
 	}
