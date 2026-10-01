@@ -278,15 +278,24 @@ func TestConnection(ctx context.Context, target store.Target, timeout time.Durat
 }
 
 func dialSSH(ctx context.Context, target store.Target) (*ssh.Client, error) {
-	key, err := os.ReadFile(target.PrivateKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("read private key: %w", err)
+	var auth ssh.AuthMethod
+	if target.AuthMethod == "password" {
+		if target.Password == "" {
+			return nil, errors.New("SSH password is not configured")
+		}
+		auth = ssh.Password(target.Password)
+	} else {
+		key, err := os.ReadFile(target.PrivateKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read private key: %w", err)
+		}
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			return nil, fmt.Errorf("parse private key: %w", err)
+		}
+		auth = ssh.PublicKeys(signer)
 	}
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
-	}
-	config := &ssh.ClientConfig{User: target.SSHUser, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: fingerprintCallback(target.HostKeyFingerprint), Timeout: 10 * time.Second}
+	config := &ssh.ClientConfig{User: target.SSHUser, Auth: []ssh.AuthMethod{auth}, HostKeyCallback: fingerprintCallback(target.HostKeyFingerprint), Timeout: 10 * time.Second}
 	dialer := net.Dialer{Timeout: 10 * time.Second}
 	netConn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(target.Host, fmt.Sprint(target.Port)))
 	if err != nil {

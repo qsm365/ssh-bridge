@@ -1,10 +1,12 @@
 # Agent 接入 SSH Bridge
 
-SSH Bridge 本地模式在 `/api/openapi.json` 提供随可执行文件发布的 OpenAPI 3.1 文档。Agent 请求使用：
+SSH Bridge 在 `/api/openapi.json` 提供随可执行文件发布的 OpenAPI 3.1 文档。Agent 请求使用：
 
 ```http
 Authorization: Bearer <SSH_BRIDGE_AGENT_TOKEN>
 ```
+
+Local 模式使用单个本地 Token；Server 模式由管理员创建具名 Token 并分配目标主机。Server 中只能列出和操作当前凭据获授权的主机；会话、执行和输出只允许创建它们的凭据查询。轮换 Token 不改变历史审计归属。
 
 ## MCP 接入
 
@@ -18,7 +20,7 @@ MCP 使用与 HTTP API 相同的 Bearer Token。服务采用无状态协议，�
 
 提供以下工具：
 
-- `list_targets`：获取不含 SSH 凭据的可用目标主机。
+- `list_targets`：获取可用目标主机的 ID、名称、SSH 用户名和说明，不返回密码或私钥。
 - `execute_command`：异步发起命令并返回会话 ID、执行 ID 和 `pending` 状态。
 - `get_execution`：在请求中断后查询状态和输出预览。
 - `wait_execution`：长等待执行结果，最长 60 秒。
@@ -26,11 +28,11 @@ MCP 使用与 HTTP API 相同的 Bearer Token。服务采用无状态协议，�
 
 `execute_command.files` 可携带文件，每项包含 `name`、`filename` 和 `content_base64`。命令仍只能使用 `{{file:name}}` 占位符，不能指定远端路径。单个文件最多 16 MiB，一次最多 8 个。
 
-服务支持 MCP `2026-07-28` 的无状态请求形式，同时兼容仍会发送 `initialize` / `notifications/initialized` 的旧客户端。由于本地管理页面没有登录步骤，MCP 端点仍强制要求 Agent Token，并拒绝来自非 localhost 网页的 Origin。
+服务支持 MCP `2026-07-28` 的无状态请求形式，同时兼容仍会发送 `initialize` / `notifications/initialized` 的旧客户端。Local 管理页面免登录，Server 管理页面要求管理员登录；两种模式的 MCP 端点均强制要求 Agent Token，并拒绝来自非 localhost 网页的 Origin。
 
 ## 推荐调用流程
 
-1. 调用 `list_targets` 获取已启用的 `target_id`。响应不会包含本机私钥路径或 Host Key 等管理配置。
+1. 调用 `list_targets` 获取已启用的 `target_id` 和 `ssh_user`，可用用户名区分同名主机。响应不会包含密码、私钥路径或 Host Key 等管理配置。
 2. 调用 `execute_command`。一次 Agent 对话的第一次调用不传 `session_id`，保存响应中的 `session_id` 和 `execution_id`。
 3. 调用 `wait_execution` 一次，通常会直接获得最终结果。若仍为 `pending` 或 `running`，可继续等待或稍后查询。
 4. 请求中断后调用 `get_execution`，并同时提供之前保存的会话 ID 和执行 ID。

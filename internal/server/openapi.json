@@ -3,7 +3,7 @@
   "info": {
     "title": "SSH Bridge Agent API",
     "version": "0.1.0",
-    "description": "Local API for AI Agents to execute audited SSH commands. The first execution omits session_id; subsequent calls in the same conversation reuse the returned session_id."
+    "description": "API for AI Agents to execute audited SSH commands. In Server mode, each token is limited to its assigned targets and own execution history. The first execution omits session_id; subsequent calls in the same conversation reuse the returned session_id."
   },
   "servers": [{ "url": "http://127.0.0.1:7408" }],
   "security": [{ "bearerAuth": [] }],
@@ -127,10 +127,11 @@
       },
       "TargetSummary": {
         "type": "object",
-        "required": ["id", "name", "description"],
+        "required": ["id", "name", "ssh_user", "description"],
         "properties": {
           "id": { "type": "string" },
           "name": { "type": "string" },
+          "ssh_user": { "type": "string" },
           "description": { "type": "string" }
         }
       },
@@ -164,6 +165,8 @@
           "session_id": { "type": "string" },
           "target_id": { "type": "string" },
           "target_name": { "type": "string" },
+          "agent_credential_id": { "type": "string" },
+          "agent_credential_name": { "type": "string" },
           "title": { "type": "string" },
           "command": { "type": "string", "description": "Original command template received from the Agent" },
           "working_dir": { "type": "string" },

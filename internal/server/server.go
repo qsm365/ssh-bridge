@@ -36,6 +36,9 @@ type App struct {
 	cfg          config.Config
 	store        *store.Store
 	runner       *executor.Runner
+	adminHash    [32]byte
+	sessionMu    sync.Mutex
+	sessions     map[string]time.Time
 	tokenMu      sync.RWMutex
 	agentToken   string
 	oneTimeToken string
@@ -69,7 +72,12 @@ var placeholderPattern = regexp.MustCompile(`\{\{file:([A-Za-z0-9_-]{1,64})\}\}`
 var openAPISpec []byte
 
 func New(cfg config.Config, data *store.Store) *http.Server {
-	a := &App{cfg: cfg, store: data, runner: &executor.Runner{Store: data, OutputDir: cfg.OutputDir(), Timeout: cfg.CommandTimeout}, agentToken: cfg.AgentToken}
+	if cfg.Mode == "" {
+		cfg.Mode = config.ModeLocal
+	}
+	adminHash := sha256.Sum256([]byte(cfg.AdminPassword))
+	cfg.AdminPassword = ""
+	a := &App{cfg: cfg, store: data, runner: &executor.Runner{Store: data, OutputDir: cfg.OutputDir(), Timeout: cfg.CommandTimeout}, adminHash: adminHash, sessions: make(map[string]time.Time), agentToken: cfg.AgentToken}
 	if cfg.RevealAgentToken {
 		a.oneTimeToken = cfg.AgentToken
 	}
@@ -78,9 +86,17 @@ func New(cfg config.Config, data *store.Store) *http.Server {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("GET /readyz", a.ready)
 	mux.HandleFunc("GET /api/v1/system/info", a.systemInfo)
+	mux.HandleFunc("POST /api/v1/auth/login", a.login)
+	mux.HandleFunc("GET /api/v1/auth/me", a.admin(a.me))
+	mux.HandleFunc("POST /api/v1/auth/logout", a.admin(a.logout))
 	mux.HandleFunc("GET /api/v1/agent-token", a.admin(a.getAgentToken))
 	mux.HandleFunc("POST /api/v1/agent-token/regenerate", a.admin(a.regenerateAgentToken))
+	mux.HandleFunc("GET /api/v1/agent-credentials", a.admin(a.listAgentCredentials))
+	mux.HandleFunc("POST /api/v1/agent-credentials", a.admin(a.createAgentCredential))
+	mux.HandleFunc("PUT /api/v1/agent-credentials/{id}", a.admin(a.updateAgentCredential))
+	mux.HandleFunc("POST /api/v1/agent-credentials/{id}/regenerate", a.admin(a.regenerateAgentCredential))
 	mux.HandleFunc("GET /api/openapi.json", a.openAPI)
 	mux.HandleFunc("/mcp", a.authorized(a.mcp))
 	mux.HandleFunc("GET /api/v1/agent/targets", a.authorized(a.listAgentTargets))
@@ -89,6 +105,7 @@ func New(cfg config.Config, data *store.Store) *http.Server {
 	mux.HandleFunc("POST /api/v1/targets/test", a.admin(a.testTargetInput))
 	mux.HandleFunc("POST /api/v1/targets/{id}/test", a.admin(a.testSavedTarget))
 	mux.HandleFunc("PUT /api/v1/targets/{id}", a.admin(a.updateTarget))
+	mux.HandleFunc("DELETE /api/v1/targets/{id}", a.admin(a.deleteTarget))
 	mux.HandleFunc("GET /api/v1/sessions", a.admin(a.listSessions))
 	mux.HandleFunc("GET /api/v1/sessions/{id}", a.admin(a.getSession))
 	mux.HandleFunc("GET /api/v1/executions", a.admin(a.listExecutions))
@@ -98,7 +115,7 @@ func New(cfg config.Config, data *store.Store) *http.Server {
 	mux.HandleFunc("GET /api/v1/sessions/{sessionID}/executions/{executionID}", a.authorized(a.getExecution))
 	mux.HandleFunc("GET /api/v1/sessions/{sessionID}/executions/{executionID}/wait", a.authorized(a.waitExecution))
 	mux.HandleFunc("GET /api/v1/sessions/{sessionID}/executions/{executionID}/output", a.authorized(a.getExecutionOutput))
-	mux.Handle("/", spaHandler())
+	mux.Handle("/", a.adminPage(spaHandler()))
 	return &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 75 * time.Second}
 }
 
@@ -116,7 +133,18 @@ func decode(w http.ResponseWriter, r *http.Request, dst any) error {
 	return dec.Decode(dst)
 }
 func (a *App) systemInfo(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{"mode": "local", "database": "sqlite", "mock": false, "openapi_url": "/api/openapi.json", "mcp_url": "/mcp"})
+	jsonResponse(w, http.StatusOK, map[string]any{"mode": a.cfg.Mode, "database": a.cfg.DatabaseName(), "mock": false, "openapi_url": "/api/openapi.json", "mcp_url": "/mcp"})
+}
+
+func (a *App) ready(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := a.store.Ping(ctx); err != nil {
+		apiError(w, http.StatusServiceUnavailable, "database is not ready")
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
 }
 
 func (a *App) openAPI(w http.ResponseWriter, _ *http.Request) {
@@ -140,6 +168,10 @@ func (a *App) hasAgentToken(r *http.Request) bool {
 }
 
 func (a *App) getAgentToken(w http.ResponseWriter, _ *http.Request) {
+	if a.cfg.Mode == config.ModeServer {
+		apiError(w, http.StatusNotFound, "local token is unavailable in server mode")
+		return
+	}
 	a.tokenMu.Lock()
 	token := a.oneTimeToken
 	a.oneTimeToken = ""
@@ -150,6 +182,10 @@ func (a *App) getAgentToken(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *App) regenerateAgentToken(w http.ResponseWriter, _ *http.Request) {
+	if a.cfg.Mode == config.ModeServer {
+		apiError(w, http.StatusNotFound, "local token is unavailable in server mode")
+		return
+	}
 	token, err := config.ReplaceAgentToken(a.cfg.DataDir)
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, err.Error())
@@ -163,11 +199,21 @@ func (a *App) regenerateAgentToken(w http.ResponseWriter, _ *http.Request) {
 		"configured": true, "token": token, "token_visible": true, "mcp_url": "/mcp",
 	})
 }
-func (a *App) admin(next http.HandlerFunc) http.HandlerFunc {
-	return next
-}
 func (a *App) authorized(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if a.cfg.Mode == config.ModeServer {
+			credentialID, err := a.authenticateCredential(r)
+			if err != nil {
+				apiError(w, http.StatusInternalServerError, "credential lookup failed")
+				return
+			}
+			if credentialID == "" {
+				apiError(w, http.StatusUnauthorized, "authentication required")
+				return
+			}
+			next(w, r.WithContext(context.WithValue(r.Context(), credentialContextKey{}, credentialID)))
+			return
+		}
 		if !a.hasAgentToken(r) {
 			apiError(w, http.StatusUnauthorized, "authentication required")
 			return
@@ -181,7 +227,10 @@ type targetRequest struct {
 	Host               string `json:"host"`
 	Port               int    `json:"port"`
 	SSHUser            string `json:"ssh_user"`
+	AuthMethod         string `json:"auth_method"`
 	PrivateKeyPath     string `json:"private_key_path"`
+	Password           string `json:"password"`
+	ExistingTargetID   string `json:"existing_target_id"`
 	HostKeyFingerprint string `json:"host_key_fingerprint"`
 	Description        string `json:"description"`
 	Enabled            *bool  `json:"enabled"`
@@ -204,13 +253,27 @@ func validateTargetConnection(r targetRequest) string {
 	if strings.TrimSpace(r.SSHUser) == "" {
 		return "ssh_user is required"
 	}
-	if strings.TrimSpace(r.PrivateKeyPath) == "" {
+	if r.AuthMethod != "" && r.AuthMethod != "key" && r.AuthMethod != "password" {
+		return "auth_method must be key or password"
+	}
+	if r.AuthMethod == "password" {
+		if r.Password == "" {
+			return "password is required"
+		}
+	} else if strings.TrimSpace(r.PrivateKeyPath) == "" {
 		return "private_key_path is required"
 	}
 	if strings.TrimSpace(r.HostKeyFingerprint) != "" {
 		if _, err := normalizeHostKeyFingerprint(r.HostKeyFingerprint); err != nil {
 			return "host_key_fingerprint must be a SHA256 fingerprint, public key, or known_hosts line"
 		}
+	}
+	return ""
+}
+
+func (a *App) validateServerKeyPath(r targetRequest) string {
+	if a.cfg.Mode == config.ModeServer && r.AuthMethod != "password" && !filepath.IsAbs(strings.TrimSpace(r.PrivateKeyPath)) {
+		return "private_key_path must be an absolute path on the server"
 	}
 	return ""
 }
@@ -246,7 +309,23 @@ func requestTarget(req targetRequest) store.Target {
 		enabled = *req.Enabled
 	}
 	fingerprint, _ := normalizeHostKeyFingerprint(req.HostKeyFingerprint)
-	return store.Target{Name: strings.TrimSpace(req.Name), Host: strings.TrimSpace(req.Host), Port: req.Port, SSHUser: strings.TrimSpace(req.SSHUser), PrivateKeyPath: strings.TrimSpace(req.PrivateKeyPath), HostKeyFingerprint: fingerprint, Description: strings.TrimSpace(req.Description), Enabled: enabled}
+	method := req.AuthMethod
+	if method == "" {
+		method = "key"
+	}
+	t := store.Target{Name: strings.TrimSpace(req.Name), Host: strings.TrimSpace(req.Host), Port: req.Port, SSHUser: strings.TrimSpace(req.SSHUser), AuthMethod: method, HostKeyFingerprint: fingerprint, Description: strings.TrimSpace(req.Description), Enabled: enabled}
+	if method == "password" {
+		t.Password = req.Password
+	} else {
+		t.PrivateKeyPath = strings.TrimSpace(req.PrivateKeyPath)
+	}
+	return t
+}
+
+func preserveTargetPassword(req *targetRequest, existing store.Target) {
+	if req.AuthMethod == "password" && req.Password == "" && existing.AuthMethod == "password" {
+		req.Password = existing.Password
+	}
 }
 func (a *App) listTargets(w http.ResponseWriter, r *http.Request) {
 	items, err := a.store.ListTargets(r.Context())
@@ -268,7 +347,17 @@ func (a *App) listAgentTargets(w http.ResponseWriter, r *http.Request) {
 		if !target.Enabled {
 			continue
 		}
-		items = append(items, map[string]any{"id": target.ID, "name": target.Name, "description": target.Description})
+		if credentialID := credentialFromContext(r.Context()); credentialID != "" {
+			allowed, err := a.store.CredentialCanAccessTarget(r.Context(), credentialID, target.ID)
+			if err != nil {
+				apiError(w, 500, "target authorization failed")
+				return
+			}
+			if !allowed {
+				continue
+			}
+		}
+		items = append(items, map[string]any{"id": target.ID, "name": target.Name, "ssh_user": target.SSHUser, "description": target.Description})
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -279,6 +368,10 @@ func (a *App) createTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if msg := validateTarget(req); msg != "" {
+		apiError(w, 400, msg)
+		return
+	}
+	if msg := a.validateServerKeyPath(req); msg != "" {
 		apiError(w, 400, msg)
 		return
 	}
@@ -302,7 +395,21 @@ func (a *App) updateTarget(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 400, "invalid request")
 		return
 	}
+	existing, err := a.store.GetTarget(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		apiError(w, 404, "target not found")
+		return
+	}
+	if err != nil {
+		apiError(w, 500, err.Error())
+		return
+	}
+	preserveTargetPassword(&req, existing)
 	if msg := validateTarget(req); msg != "" {
+		apiError(w, 400, msg)
+		return
+	}
+	if msg := a.validateServerKeyPath(req); msg != "" {
 		apiError(w, 400, msg)
 		return
 	}
@@ -319,13 +426,42 @@ func (a *App) updateTarget(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 200, saved)
 }
 
+func (a *App) deleteTarget(w http.ResponseWriter, r *http.Request) {
+	err := a.store.DeleteTarget(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		apiError(w, http.StatusNotFound, "target not found")
+		return
+	}
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (a *App) testTargetInput(w http.ResponseWriter, r *http.Request) {
 	var req targetRequest
 	if err := decode(w, r, &req); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
+	if req.ExistingTargetID != "" {
+		existing, err := a.store.GetTarget(r.Context(), req.ExistingTargetID)
+		if errors.Is(err, store.ErrNotFound) {
+			apiError(w, http.StatusNotFound, "target not found")
+			return
+		}
+		if err != nil {
+			apiError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		preserveTargetPassword(&req, existing)
+	}
 	if message := validateTargetConnection(req); message != "" {
+		apiError(w, http.StatusBadRequest, message)
+		return
+	}
+	if message := a.validateServerKeyPath(req); message != "" {
 		apiError(w, http.StatusBadRequest, message)
 		return
 	}
@@ -432,6 +568,16 @@ func (a *App) startExecution(ctx context.Context, req executionRequest, uploads 
 	if !target.Enabled {
 		return acceptedExecution{}, http.StatusConflict, errors.New("target is disabled")
 	}
+	credentialID := credentialFromContext(ctx)
+	if a.cfg.Mode == config.ModeServer {
+		allowed, err := a.store.CredentialCanAccessTarget(ctx, credentialID, target.ID)
+		if err != nil {
+			return acceptedExecution{}, 500, err
+		}
+		if !allowed {
+			return acceptedExecution{}, http.StatusForbidden, errors.New("target is not authorized")
+		}
+	}
 	createSession := req.SessionID == ""
 	sessionID := req.SessionID
 	if createSession {
@@ -450,7 +596,7 @@ func (a *App) startExecution(ctx context.Context, req executionRequest, uploads 
 	if err != nil {
 		return acceptedExecution{}, http.StatusInternalServerError, err
 	}
-	session := store.AgentSession{ID: sessionID, Title: strings.TrimSpace(req.SessionTitle), CreatedAt: now, UpdatedAt: now}
+	session := store.AgentSession{ID: sessionID, Title: strings.TrimSpace(req.SessionTitle), AgentCredentialID: credentialID, CreatedAt: now, UpdatedAt: now}
 	if session.Title == "" {
 		session.Title = e.Title
 	}
@@ -578,6 +724,9 @@ func (a *App) archiveUploads(uploads []uploadedFile, execution store.Execution) 
 	return artifacts, dir, nil
 }
 func (a *App) getExecution(w http.ResponseWriter, r *http.Request) {
+	if !a.requireExecutionOwner(w, r) {
+		return
+	}
 	e, err := a.store.GetExecution(r.Context(), r.PathValue("sessionID"), r.PathValue("executionID"))
 	if errors.Is(err, store.ErrNotFound) {
 		apiError(w, 404, "execution not found")
@@ -627,6 +776,9 @@ func (a *App) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, artifact.OriginalName, artifact.CreatedAt, file)
 }
 func (a *App) getExecutionOutput(w http.ResponseWriter, r *http.Request) {
+	if !a.requireExecutionOwner(w, r) {
+		return
+	}
 	e, err := a.store.GetExecution(r.Context(), r.PathValue("sessionID"), r.PathValue("executionID"))
 	if errors.Is(err, store.ErrNotFound) {
 		apiError(w, http.StatusNotFound, "execution not found")
@@ -675,6 +827,9 @@ func terminal(status string) bool {
 	return status == "succeeded" || status == "failed" || status == "timeout"
 }
 func (a *App) waitExecution(w http.ResponseWriter, r *http.Request) {
+	if !a.requireExecutionOwner(w, r) {
+		return
+	}
 	seconds := 55
 	if raw := r.URL.Query().Get("timeout"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n >= 1 && n <= 60 {

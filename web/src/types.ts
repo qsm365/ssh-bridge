@@ -5,6 +5,8 @@ export interface Execution {
   session_id: string
   target_id: string
   target_name: string
+  agent_credential_id?: string
+  agent_credential_name?: string
   title: string
   command: string
   working_dir: string
@@ -36,7 +38,9 @@ export interface Target {
   host: string
   port: number
   ssh_user: string
+  auth_method: 'key' | 'password'
   private_key_path?: string
+  password_configured: boolean
   host_key_fingerprint: string
   description: string
   enabled: boolean
@@ -47,6 +51,8 @@ export interface Target {
 export interface AuditSession {
   id: string
   title: string
+  agent_credential_id?: string
+  agent_credential_name?: string
   created_at: string
   updated_at: string
   execution_count: number

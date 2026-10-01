@@ -1,19 +1,28 @@
 import type { AuditSession, Execution, Target } from './types'
+import { locale, t } from './i18n'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api/v1${path}`, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...init?.headers }, ...init })
   if (!response.ok) {
-    const body = await response.json().catch(() => ({ error: `请求失败 (${response.status})` }))
-    throw new Error(body.error || `请求失败 (${response.status})`)
+	if (response.status === 401 && path !== '/auth/me' && path !== '/auth/login' && window.location.pathname !== '/login') {
+		window.location.assign(`/login?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`)
+	}
+    const body = await response.json().catch(() => ({ error: t('请求失败 ({status})', { status: response.status }) }))
+    throw new Error(body.error || t('请求失败 ({status})', { status: response.status }))
   }
   if (response.status === 204) return undefined as T
   return response.json()
 }
 
 export const api = {
+  systemInfo: () => request<SystemInfo>('/system/info'),
+  authMe: () => request<{ username: string }>('/auth/me'),
+  login: (password: string) => request<{ username: string }>('/auth/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password }) }),
+  logout: () => request<void>('/auth/logout', { method: 'POST' }),
   targets: () => request<{ items: Target[] }>('/targets'),
   createTarget: (body: object) => request<Target>('/targets', { method: 'POST', body: JSON.stringify(body) }),
   updateTarget: (id: string, body: object) => request<Target>(`/targets/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  deleteTarget: (id: string) => request<void>(`/targets/${id}`, { method: 'DELETE' }),
   testTarget: (body: object) => request<ConnectionTest>('/targets/test', { method: 'POST', body: JSON.stringify(body) }),
   testSavedTarget: (id: string) => request<ConnectionTest>(`/targets/${id}/test`, { method: 'POST' }),
   sessions: () => request<{ items: AuditSession[] }>('/sessions'),
@@ -22,14 +31,22 @@ export const api = {
   execution: (sessionId: string, executionId: string) => request<Execution>(`/sessions/${sessionId}/executions/${executionId}`),
   agentToken: () => request<AgentTokenInfo>('/agent-token'),
   regenerateAgentToken: () => request<AgentTokenInfo>('/agent-token/regenerate', { method: 'POST' }),
+  agentCredentials: () => request<{ items: AgentCredential[] }>('/agent-credentials'),
+  createAgentCredential: (body: AgentCredentialInput) => request<AgentCredentialIssued>('/agent-credentials', { method: 'POST', body: JSON.stringify(body) }),
+  updateAgentCredential: (id: string, body: AgentCredentialInput) => request<AgentCredential>(`/agent-credentials/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  regenerateAgentCredential: (id: string) => request<AgentCredentialIssued>(`/agent-credentials/${id}/regenerate`, { method: 'POST' }),
 }
 
 export interface ConnectionTest { success: boolean; duration_ms: number; message: string }
 export interface AgentTokenInfo { configured: boolean; token: string; token_visible: boolean; mcp_url: string }
+export interface AgentCredential { id: string; name: string; token_prefix: string; enabled: boolean; target_ids: string[]; created_at: string; updated_at: string; last_used_at?: string }
+export interface AgentCredentialInput { name: string; target_ids: string[]; enabled: boolean }
+export interface AgentCredentialIssued { id?: string; name?: string; token: string; token_prefix: string }
+export interface SystemInfo { mode: 'local' | 'server'; database: 'sqlite' | 'postgresql' | 'mysql'; mock: boolean; openapi_url: string; mcp_url: string }
 
 export function formatTime(value: string | null) {
   if (!value) return '—'
-  return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium', hour12: false }).format(new Date(value))
+  return new Intl.DateTimeFormat(locale.value, { dateStyle: 'short', timeStyle: 'medium', hour12: false }).format(new Date(value))
 }
 export function formatBytes(value: number) {
   if (value < 1024) return `${value} B`

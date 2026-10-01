@@ -5,14 +5,23 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"strings"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
 var ErrNotFound = errors.New("not found")
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db      *sql.DB
+	dialect string
+	secrets *secretCipher
+}
 
 type Target struct {
 	ID                 string    `json:"id"`
@@ -20,7 +29,10 @@ type Target struct {
 	Host               string    `json:"host"`
 	Port               int       `json:"port"`
 	SSHUser            string    `json:"ssh_user"`
+	AuthMethod         string    `json:"auth_method"`
 	PrivateKeyPath     string    `json:"private_key_path,omitempty"`
+	Password           string    `json:"-"`
+	PasswordConfigured bool      `json:"password_configured"`
 	HostKeyFingerprint string    `json:"host_key_fingerprint"`
 	Description        string    `json:"description"`
 	Enabled            bool      `json:"enabled"`
@@ -29,32 +41,36 @@ type Target struct {
 }
 
 type AgentSession struct {
-	ID             string    `json:"id"`
-	Title          string    `json:"title"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	ExecutionCount int       `json:"execution_count"`
-	HasError       bool      `json:"has_error"`
+	ID                  string    `json:"id"`
+	Title               string    `json:"title"`
+	AgentCredentialID   string    `json:"agent_credential_id,omitempty"`
+	AgentCredentialName string    `json:"agent_credential_name,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+	ExecutionCount      int       `json:"execution_count"`
+	HasError            bool      `json:"has_error"`
 }
 
 type Execution struct {
-	ID            string     `json:"id"`
-	SessionID     string     `json:"session_id"`
-	TargetID      string     `json:"target_id"`
-	TargetName    string     `json:"target_name,omitempty"`
-	Title         string     `json:"title"`
-	Command       string     `json:"command"`
-	WorkingDir    string     `json:"working_dir"`
-	Status        string     `json:"status"`
-	ExitCode      *int       `json:"exit_code"`
-	ErrorMessage  string     `json:"error_message,omitempty"`
-	OutputPath    string     `json:"-"`
-	OutputSize    int64      `json:"output_size"`
-	OutputPreview string     `json:"output_preview"`
-	CreatedAt     time.Time  `json:"created_at"`
-	StartedAt     *time.Time `json:"started_at"`
-	FinishedAt    *time.Time `json:"finished_at"`
-	Artifacts     []Artifact `json:"artifacts,omitempty"`
+	ID                  string     `json:"id"`
+	SessionID           string     `json:"session_id"`
+	TargetID            string     `json:"target_id"`
+	TargetName          string     `json:"target_name,omitempty"`
+	AgentCredentialID   string     `json:"agent_credential_id,omitempty"`
+	AgentCredentialName string     `json:"agent_credential_name,omitempty"`
+	Title               string     `json:"title"`
+	Command             string     `json:"command"`
+	WorkingDir          string     `json:"working_dir"`
+	Status              string     `json:"status"`
+	ExitCode            *int       `json:"exit_code"`
+	ErrorMessage        string     `json:"error_message,omitempty"`
+	OutputPath          string     `json:"-"`
+	OutputSize          int64      `json:"output_size"`
+	OutputPreview       string     `json:"output_preview"`
+	CreatedAt           time.Time  `json:"created_at"`
+	StartedAt           *time.Time `json:"started_at"`
+	FinishedAt          *time.Time `json:"finished_at"`
+	Artifacts           []Artifact `json:"artifacts,omitempty"`
 }
 
 type Artifact struct {
@@ -75,49 +91,249 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
+	return open(db, "sqlite")
+}
+
+func OpenPostgres(databaseURL string) (*Store, error) {
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	return open(db, "postgres")
+}
+
+func OpenServerDatabase(databaseName, databaseURL string) (*Store, error) {
+	switch databaseName {
+	case "postgresql":
+		return OpenPostgres(databaseURL)
+	case "mysql":
+		return OpenMySQL(databaseURL)
+	default:
+		return nil, fmt.Errorf("unsupported server database %q", databaseName)
+	}
+}
+
+func OpenMySQL(databaseURL string) (*Store, error) {
+	dsn, err := mysqlDSN(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	return open(db, "mysql")
+}
+
+func mysqlDSN(databaseURL string) (string, error) {
+	parsed, err := url.Parse(databaseURL)
+	if err != nil || parsed.Scheme != "mysql" {
+		return "", errors.New("MySQL database URL must use mysql://")
+	}
+	databaseName := strings.TrimPrefix(parsed.Path, "/")
+	if parsed.User == nil || parsed.User.Username() == "" || parsed.Host == "" || databaseName == "" {
+		return "", errors.New("MySQL database URL must include user, host, and database name")
+	}
+	password, _ := parsed.User.Password()
+	cfg := mysqldriver.NewConfig()
+	cfg.User = parsed.User.Username()
+	cfg.Passwd = password
+	cfg.Net = "tcp"
+	cfg.Addr = parsed.Host
+	if parsed.Port() == "" {
+		cfg.Addr = net.JoinHostPort(parsed.Hostname(), "3306")
+	}
+	cfg.DBName = databaseName
+	cfg.Params = make(map[string]string, len(parsed.Query()))
+	for key, values := range parsed.Query() {
+		if len(values) != 0 {
+			cfg.Params[key] = values[len(values)-1]
+		}
+	}
+	return cfg.FormatDSN(), nil
+}
+
+func open(db *sql.DB, dialect string) (*Store, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("connect to %s database: %w", dialect, err)
+	}
+	s := &Store{db: db, dialect: dialect}
 	if err := s.migrate(context.Background()); err != nil {
 		db.Close()
 		return nil, err
 	}
-	if _, err := db.Exec(`UPDATE executions SET status='failed', error_message='SSH Bridge restarted before execution completed', finished_at=? WHERE status IN ('pending','running')`, nowText()); err != nil {
+	if _, err := s.exec(context.Background(), `UPDATE executions SET status='failed', error_message='SSH Bridge restarted before execution completed', finished_at=? WHERE status IN ('pending','running')`, nowText()); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error                   { return s.db.Close() }
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
-func (s *Store) migrate(ctx context.Context) error {
-	const schema = `
-CREATE TABLE IF NOT EXISTS targets (
+func (s *Store) bind(query string) string {
+	if s.dialect != "postgres" {
+		return query
+	}
+	var b strings.Builder
+	argument := 1
+	for _, character := range query {
+		if character == '?' {
+			fmt.Fprintf(&b, "$%d", argument)
+			argument++
+		} else {
+			b.WriteRune(character)
+		}
+	}
+	return b.String()
+}
+
+func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return s.db.ExecContext(ctx, s.bind(query), args...)
+}
+func (s *Store) query(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return s.db.QueryContext(ctx, s.bind(query), args...)
+}
+func (s *Store) queryRow(ctx context.Context, query string, args ...any) *sql.Row {
+	return s.db.QueryRowContext(ctx, s.bind(query), args...)
+}
+
+type migration struct {
+	version    int
+	statements []string
+}
+
+var sqlitePostgresMigrations = []migration{{version: 1, statements: []string{
+	`CREATE TABLE IF NOT EXISTS targets (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL,
  ssh_user TEXT NOT NULL, private_key_path TEXT NOT NULL, host_key_fingerprint TEXT NOT NULL,
  description TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS agent_sessions (
+)`,
+	`CREATE TABLE IF NOT EXISTS agent_sessions (
  id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS executions (
+)`,
+	`CREATE TABLE IF NOT EXISTS executions (
  id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES agent_sessions(id),
  target_id TEXT NOT NULL REFERENCES targets(id), title TEXT NOT NULL DEFAULT '', command TEXT NOT NULL,
  working_dir TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, exit_code INTEGER, error_message TEXT NOT NULL DEFAULT '',
  output_path TEXT NOT NULL DEFAULT '', output_size INTEGER NOT NULL DEFAULT 0, output_preview TEXT NOT NULL DEFAULT '',
  created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT
-);
-CREATE TABLE IF NOT EXISTS execution_artifacts (
+)`,
+	`CREATE TABLE IF NOT EXISTS execution_artifacts (
  id TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES executions(id),
  placeholder TEXT NOT NULL, original_name TEXT NOT NULL, local_path TEXT NOT NULL,
  remote_path TEXT NOT NULL DEFAULT '', size INTEGER NOT NULL, sha256 TEXT NOT NULL,
  created_at TEXT NOT NULL, UNIQUE(execution_id, placeholder)
-);
-CREATE INDEX IF NOT EXISTS idx_executions_session_created ON executions(session_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_executions_created ON executions(created_at DESC);
-`
-	_, err := s.db.ExecContext(ctx, schema)
-	return err
+)`,
+	`CREATE INDEX IF NOT EXISTS idx_executions_session_created ON executions(session_id, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_executions_created ON executions(created_at DESC)`,
+}}, {version: 2, statements: []string{
+	`ALTER TABLE targets ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'key'`,
+	`ALTER TABLE targets ADD COLUMN password_ciphertext TEXT`,
+}}, {version: 3, statements: []string{
+	`ALTER TABLE targets ADD COLUMN deleted_at TEXT`,
+}}, {version: 4, statements: []string{
+	`CREATE TABLE agent_credentials (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, token_prefix TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT)`,
+	`CREATE TABLE agent_credential_targets (agent_credential_id TEXT NOT NULL REFERENCES agent_credentials(id), target_id TEXT NOT NULL REFERENCES targets(id), PRIMARY KEY(agent_credential_id,target_id))`,
+	`ALTER TABLE agent_sessions ADD COLUMN agent_credential_id TEXT REFERENCES agent_credentials(id)`,
+}}}
+
+var mysqlMigrations = []migration{{version: 1, statements: []string{
+	`CREATE TABLE IF NOT EXISTS targets (
+ id VARCHAR(64) PRIMARY KEY, name VARCHAR(255) NOT NULL, host VARCHAR(255) NOT NULL, port INTEGER NOT NULL,
+ ssh_user TEXT NOT NULL, private_key_path TEXT NOT NULL, host_key_fingerprint TEXT NOT NULL,
+ description TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+ created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL
+)`,
+	`CREATE TABLE IF NOT EXISTS agent_sessions (
+ id VARCHAR(64) PRIMARY KEY, title TEXT NOT NULL, created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL
+)`,
+	`CREATE TABLE IF NOT EXISTS executions (
+ id VARCHAR(64) PRIMARY KEY, session_id VARCHAR(64) NOT NULL REFERENCES agent_sessions(id),
+ target_id VARCHAR(64) NOT NULL REFERENCES targets(id), title TEXT NOT NULL, command TEXT NOT NULL,
+ working_dir TEXT NOT NULL, status VARCHAR(20) NOT NULL, exit_code INTEGER, error_message TEXT NOT NULL,
+ output_path TEXT NOT NULL, output_size BIGINT NOT NULL DEFAULT 0, output_preview TEXT NOT NULL,
+ created_at VARCHAR(40) NOT NULL, started_at VARCHAR(40), finished_at VARCHAR(40)
+)`,
+	`CREATE TABLE IF NOT EXISTS execution_artifacts (
+ id VARCHAR(64) PRIMARY KEY, execution_id VARCHAR(64) NOT NULL REFERENCES executions(id),
+ placeholder VARCHAR(64) NOT NULL, original_name TEXT NOT NULL, local_path TEXT NOT NULL,
+ remote_path TEXT NOT NULL, size BIGINT NOT NULL, sha256 VARCHAR(64) NOT NULL,
+ created_at VARCHAR(40) NOT NULL, UNIQUE(execution_id, placeholder)
+)`,
+	`CREATE INDEX idx_executions_session_created ON executions(session_id, created_at)`,
+	`CREATE INDEX idx_executions_created ON executions(created_at DESC)`,
+}}, {version: 2, statements: []string{
+	`ALTER TABLE targets ADD COLUMN auth_method VARCHAR(20) NOT NULL DEFAULT 'key', ADD COLUMN password_ciphertext TEXT`,
+}}, {version: 3, statements: []string{
+	`ALTER TABLE targets ADD COLUMN deleted_at VARCHAR(40)`,
+}}, {version: 4, statements: []string{
+	`CREATE TABLE agent_credentials (id VARCHAR(64) PRIMARY KEY, name VARCHAR(255) NOT NULL, token_hash VARCHAR(64) NOT NULL UNIQUE, token_prefix VARCHAR(32) NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL, last_used_at VARCHAR(40))`,
+	`CREATE TABLE agent_credential_targets (agent_credential_id VARCHAR(64) NOT NULL, target_id VARCHAR(64) NOT NULL, PRIMARY KEY(agent_credential_id,target_id), FOREIGN KEY (agent_credential_id) REFERENCES agent_credentials(id), FOREIGN KEY (target_id) REFERENCES targets(id))`,
+	`ALTER TABLE agent_sessions ADD COLUMN agent_credential_id VARCHAR(64) NULL, ADD CONSTRAINT fk_agent_sessions_credential FOREIGN KEY (agent_credential_id) REFERENCES agent_credentials(id)`,
+}}}
+
+func (s *Store) migrations() []migration {
+	if s.dialect == "mysql" {
+		return mysqlMigrations
+	}
+	return sqlitePostgresMigrations
+}
+
+func (s *Store) migrate(ctx context.Context) error {
+	migrationTable := `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`
+	if s.dialect == "mysql" {
+		migrationTable = `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at VARCHAR(40) NOT NULL)`
+	}
+	if _, err := s.db.ExecContext(ctx, migrationTable); err != nil {
+		return fmt.Errorf("create migration table: %w", err)
+	}
+	for _, item := range s.migrations() {
+		var exists int
+		err := s.queryRow(ctx, `SELECT 1 FROM schema_migrations WHERE version=?`, item.version).Scan(&exists)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("check migration %d: %w", item.version, err)
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		for _, statement := range item.statements {
+			if _, err = tx.ExecContext(ctx, statement); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("apply migration %d: %w", item.version, err)
+			}
+		}
+		if _, err = tx.ExecContext(ctx, s.bind(`INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)`), item.version, nowText()); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("record migration %d: %w", item.version, err)
+		}
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %d: %w", item.version, err)
+		}
+	}
+	return nil
+}
+
+func enabledValue(enabled bool) int {
+	if enabled {
+		return 1
+	}
+	return 0
 }
 
 func nowText() string              { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -131,7 +347,7 @@ func parseOptional(v sql.NullString) *time.Time {
 }
 
 func (s *Store) ListTargets(ctx context.Context) ([]Target, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,host,port,ssh_user,private_key_path,host_key_fingerprint,description,enabled,created_at,updated_at FROM targets ORDER BY name`)
+	rows, err := s.query(ctx, `SELECT id,name,host,port,ssh_user,auth_method,private_key_path,password_ciphertext,host_key_fingerprint,description,enabled,created_at,updated_at FROM targets WHERE deleted_at IS NULL ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -140,10 +356,12 @@ func (s *Store) ListTargets(ctx context.Context) ([]Target, error) {
 	for rows.Next() {
 		var t Target
 		var enabled int
+		var ciphertext sql.NullString
 		var created, updated string
-		if err := rows.Scan(&t.ID, &t.Name, &t.Host, &t.Port, &t.SSHUser, &t.PrivateKeyPath, &t.HostKeyFingerprint, &t.Description, &enabled, &created, &updated); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Host, &t.Port, &t.SSHUser, &t.AuthMethod, &t.PrivateKeyPath, &ciphertext, &t.HostKeyFingerprint, &t.Description, &enabled, &created, &updated); err != nil {
 			return nil, err
 		}
+		t.PasswordConfigured = ciphertext.Valid && ciphertext.String != ""
 		t.Enabled = enabled != 0
 		t.CreatedAt = parseTime(created)
 		t.UpdatedAt = parseTime(updated)
@@ -155,13 +373,24 @@ func (s *Store) ListTargets(ctx context.Context) ([]Target, error) {
 func (s *Store) GetTarget(ctx context.Context, id string) (Target, error) {
 	var t Target
 	var enabled int
+	var ciphertext sql.NullString
 	var created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,host,port,ssh_user,private_key_path,host_key_fingerprint,description,enabled,created_at,updated_at FROM targets WHERE id=?`, id).Scan(&t.ID, &t.Name, &t.Host, &t.Port, &t.SSHUser, &t.PrivateKeyPath, &t.HostKeyFingerprint, &t.Description, &enabled, &created, &updated)
+	err := s.queryRow(ctx, `SELECT id,name,host,port,ssh_user,auth_method,private_key_path,password_ciphertext,host_key_fingerprint,description,enabled,created_at,updated_at FROM targets WHERE id=? AND deleted_at IS NULL`, id).Scan(&t.ID, &t.Name, &t.Host, &t.Port, &t.SSHUser, &t.AuthMethod, &t.PrivateKeyPath, &ciphertext, &t.HostKeyFingerprint, &t.Description, &enabled, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return t, ErrNotFound
 	}
 	if err != nil {
 		return t, err
+	}
+	t.PasswordConfigured = ciphertext.Valid && ciphertext.String != ""
+	if t.PasswordConfigured {
+		if s.secrets == nil {
+			return t, errors.New("password encryption key is not configured")
+		}
+		t.Password, err = s.secrets.decrypt(ciphertext.String)
+		if err != nil {
+			return t, fmt.Errorf("decrypt target password: %w", err)
+		}
 	}
 	t.Enabled = enabled != 0
 	t.CreatedAt = parseTime(created)
@@ -170,13 +399,21 @@ func (s *Store) GetTarget(ctx context.Context, id string) (Target, error) {
 }
 
 func (s *Store) SaveTarget(ctx context.Context, t Target) error {
+	ciphertext, err := s.targetPasswordCiphertext(t)
+	if err != nil {
+		return err
+	}
 	now := nowText()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO targets(id,name,host,port,ssh_user,private_key_path,host_key_fingerprint,description,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, t.ID, t.Name, t.Host, t.Port, t.SSHUser, t.PrivateKeyPath, t.HostKeyFingerprint, t.Description, t.Enabled, now, now)
+	_, err = s.exec(ctx, `INSERT INTO targets(id,name,host,port,ssh_user,auth_method,private_key_path,password_ciphertext,host_key_fingerprint,description,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, t.ID, t.Name, t.Host, t.Port, t.SSHUser, targetAuthMethod(t), t.PrivateKeyPath, ciphertext, t.HostKeyFingerprint, t.Description, enabledValue(t.Enabled), now, now)
 	return err
 }
 
 func (s *Store) UpdateTarget(ctx context.Context, t Target) error {
-	r, err := s.db.ExecContext(ctx, `UPDATE targets SET name=?,host=?,port=?,ssh_user=?,private_key_path=?,host_key_fingerprint=?,description=?,enabled=?,updated_at=? WHERE id=?`, t.Name, t.Host, t.Port, t.SSHUser, t.PrivateKeyPath, t.HostKeyFingerprint, t.Description, t.Enabled, nowText(), t.ID)
+	ciphertext, err := s.targetPasswordCiphertext(t)
+	if err != nil {
+		return err
+	}
+	r, err := s.exec(ctx, `UPDATE targets SET name=?,host=?,port=?,ssh_user=?,auth_method=?,private_key_path=?,password_ciphertext=?,host_key_fingerprint=?,description=?,enabled=?,updated_at=? WHERE id=? AND deleted_at IS NULL`, t.Name, t.Host, t.Port, t.SSHUser, targetAuthMethod(t), t.PrivateKeyPath, ciphertext, t.HostKeyFingerprint, t.Description, enabledValue(t.Enabled), nowText(), t.ID)
 	if err != nil {
 		return err
 	}
@@ -187,6 +424,39 @@ func (s *Store) UpdateTarget(ctx context.Context, t Target) error {
 	return nil
 }
 
+func (s *Store) DeleteTarget(ctx context.Context, id string) error {
+	now := nowText()
+	r, err := s.exec(ctx, `UPDATE targets SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL`, now, now, id)
+	if err != nil {
+		return err
+	}
+	count, err := r.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func targetAuthMethod(t Target) string {
+	if t.AuthMethod == "password" {
+		return "password"
+	}
+	return "key"
+}
+
+func (s *Store) targetPasswordCiphertext(t Target) (any, error) {
+	if targetAuthMethod(t) != "password" {
+		return nil, nil
+	}
+	if s.secrets == nil {
+		return nil, errors.New("password encryption key is not configured")
+	}
+	return s.secrets.encrypt(t.Password)
+}
+
 func (s *Store) CreateExecution(ctx context.Context, session AgentSession, e Execution, artifacts []Artifact, createSession bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -195,29 +465,34 @@ func (s *Store) CreateExecution(ctx context.Context, session AgentSession, e Exe
 	defer tx.Rollback()
 	now := e.CreatedAt.UTC().Format(time.RFC3339Nano)
 	if createSession {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO agent_sessions(id,title,created_at,updated_at) VALUES(?,?,?,?)`, session.ID, session.Title, now, now); err != nil {
+		var owner any
+		if session.AgentCredentialID != "" {
+			owner = session.AgentCredentialID
+		}
+		if _, err = tx.ExecContext(ctx, s.bind(`INSERT INTO agent_sessions(id,title,created_at,updated_at,agent_credential_id) VALUES(?,?,?,?,?)`), session.ID, session.Title, now, now, owner); err != nil {
 			return err
 		}
 	} else {
 		var exists int
-		if err = tx.QueryRowContext(ctx, `SELECT 1 FROM agent_sessions WHERE id=?`, e.SessionID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		owner := session.AgentCredentialID
+		if err = tx.QueryRowContext(ctx, s.bind(`SELECT 1 FROM agent_sessions WHERE id=? AND ((agent_credential_id=? ) OR (agent_credential_id IS NULL AND ?=''))`), e.SessionID, owner, owner).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		if err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE agent_sessions SET updated_at=? WHERE id=?`, now, e.SessionID)
+		_, err = tx.ExecContext(ctx, s.bind(`UPDATE agent_sessions SET updated_at=? WHERE id=?`), now, e.SessionID)
 		if err != nil {
 			return err
 		}
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO executions(id,session_id,target_id,title,command,working_dir,status,created_at) VALUES(?,?,?,?,?,?,?,?)`, e.ID, e.SessionID, e.TargetID, e.Title, e.Command, e.WorkingDir, e.Status, now)
+	_, err = tx.ExecContext(ctx, s.bind(`INSERT INTO executions(id,session_id,target_id,title,command,working_dir,status,exit_code,error_message,output_path,output_size,output_preview,created_at,started_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`), e.ID, e.SessionID, e.TargetID, e.Title, e.Command, e.WorkingDir, e.Status, e.ExitCode, e.ErrorMessage, e.OutputPath, e.OutputSize, e.OutputPreview, now, nil, nil)
 	if err != nil {
 		return err
 	}
 	for _, artifact := range artifacts {
 		created := artifact.CreatedAt.UTC().Format(time.RFC3339Nano)
-		if _, err = tx.ExecContext(ctx, `INSERT INTO execution_artifacts(id,execution_id,placeholder,original_name,local_path,size,sha256,created_at) VALUES(?,?,?,?,?,?,?,?)`, artifact.ID, e.ID, artifact.Placeholder, artifact.OriginalName, artifact.LocalPath, artifact.Size, artifact.SHA256, created); err != nil {
+		if _, err = tx.ExecContext(ctx, s.bind(`INSERT INTO execution_artifacts(id,execution_id,placeholder,original_name,local_path,remote_path,size,sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?)`), artifact.ID, e.ID, artifact.Placeholder, artifact.OriginalName, artifact.LocalPath, artifact.RemotePath, artifact.Size, artifact.SHA256, created); err != nil {
 			return err
 		}
 	}
@@ -225,12 +500,12 @@ func (s *Store) CreateExecution(ctx context.Context, session AgentSession, e Exe
 }
 
 func (s *Store) MarkArtifactRemotePath(ctx context.Context, id, path string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE execution_artifacts SET remote_path=? WHERE id=?`, path, id)
+	_, err := s.exec(ctx, `UPDATE execution_artifacts SET remote_path=? WHERE id=?`, path, id)
 	return err
 }
 
 func (s *Store) ListArtifacts(ctx context.Context, executionID string) ([]Artifact, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,execution_id,placeholder,original_name,local_path,remote_path,size,sha256,created_at FROM execution_artifacts WHERE execution_id=? ORDER BY placeholder`, executionID)
+	rows, err := s.query(ctx, `SELECT id,execution_id,placeholder,original_name,local_path,remote_path,size,sha256,created_at FROM execution_artifacts WHERE execution_id=? ORDER BY placeholder`, executionID)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +526,7 @@ func (s *Store) ListArtifacts(ctx context.Context, executionID string) ([]Artifa
 func (s *Store) GetArtifact(ctx context.Context, executionID, id string) (Artifact, error) {
 	var artifact Artifact
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id,execution_id,placeholder,original_name,local_path,remote_path,size,sha256,created_at FROM execution_artifacts WHERE execution_id=? AND id=?`, executionID, id).Scan(&artifact.ID, &artifact.ExecutionID, &artifact.Placeholder, &artifact.OriginalName, &artifact.LocalPath, &artifact.RemotePath, &artifact.Size, &artifact.SHA256, &created)
+	err := s.queryRow(ctx, `SELECT id,execution_id,placeholder,original_name,local_path,remote_path,size,sha256,created_at FROM execution_artifacts WHERE execution_id=? AND id=?`, executionID, id).Scan(&artifact.ID, &artifact.ExecutionID, &artifact.Placeholder, &artifact.OriginalName, &artifact.LocalPath, &artifact.RemotePath, &artifact.Size, &artifact.SHA256, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return artifact, ErrNotFound
 	}
@@ -263,11 +538,11 @@ func (s *Store) GetArtifact(ctx context.Context, executionID, id string) (Artifa
 }
 
 func (s *Store) MarkRunning(ctx context.Context, id, path string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE executions SET status='running',started_at=?,output_path=? WHERE id=?`, nowText(), path, id)
+	_, err := s.exec(ctx, `UPDATE executions SET status='running',started_at=?,output_path=? WHERE id=?`, nowText(), path, id)
 	return err
 }
 func (s *Store) FinishExecution(ctx context.Context, id, status string, exitCode *int, message string, size int64, preview string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE executions SET status=?,exit_code=?,error_message=?,output_size=?,output_preview=?,finished_at=? WHERE id=?`, status, exitCode, message, size, preview, nowText(), id)
+	_, err := s.exec(ctx, `UPDATE executions SET status=?,exit_code=?,error_message=?,output_size=?,output_preview=?,finished_at=? WHERE id=?`, status, exitCode, message, size, preview, nowText(), id)
 	return err
 }
 
@@ -276,7 +551,8 @@ func scanExecution(scanner interface{ Scan(...any) error }) (Execution, error) {
 	var exit sql.NullInt64
 	var created string
 	var started, finished sql.NullString
-	err := scanner.Scan(&e.ID, &e.SessionID, &e.TargetID, &e.TargetName, &e.Title, &e.Command, &e.WorkingDir, &e.Status, &exit, &e.ErrorMessage, &e.OutputPath, &e.OutputSize, &e.OutputPreview, &created, &started, &finished)
+	var credentialID, credentialName sql.NullString
+	err := scanner.Scan(&e.ID, &e.SessionID, &e.TargetID, &e.TargetName, &credentialID, &credentialName, &e.Title, &e.Command, &e.WorkingDir, &e.Status, &exit, &e.ErrorMessage, &e.OutputPath, &e.OutputSize, &e.OutputPreview, &created, &started, &finished)
 	if err != nil {
 		return e, err
 	}
@@ -284,16 +560,17 @@ func scanExecution(scanner interface{ Scan(...any) error }) (Execution, error) {
 		x := int(exit.Int64)
 		e.ExitCode = &x
 	}
+	e.AgentCredentialID, e.AgentCredentialName = credentialID.String, credentialName.String
 	e.CreatedAt = parseTime(created)
 	e.StartedAt = parseOptional(started)
 	e.FinishedAt = parseOptional(finished)
 	return e, nil
 }
 
-const executionSelect = `SELECT e.id,e.session_id,e.target_id,t.name,e.title,e.command,e.working_dir,e.status,e.exit_code,e.error_message,e.output_path,e.output_size,e.output_preview,e.created_at,e.started_at,e.finished_at FROM executions e JOIN targets t ON t.id=e.target_id`
+const executionSelect = `SELECT e.id,e.session_id,e.target_id,t.name,s.agent_credential_id,c.name,e.title,e.command,e.working_dir,e.status,e.exit_code,e.error_message,e.output_path,e.output_size,e.output_preview,e.created_at,e.started_at,e.finished_at FROM executions e JOIN targets t ON t.id=e.target_id JOIN agent_sessions s ON s.id=e.session_id LEFT JOIN agent_credentials c ON c.id=s.agent_credential_id`
 
 func (s *Store) GetExecution(ctx context.Context, sessionID, id string) (Execution, error) {
-	e, err := scanExecution(s.db.QueryRowContext(ctx, executionSelect+` WHERE e.session_id=? AND e.id=?`, sessionID, id))
+	e, err := scanExecution(s.queryRow(ctx, executionSelect+` WHERE e.session_id=? AND e.id=?`, sessionID, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return e, ErrNotFound
 	}
@@ -301,14 +578,14 @@ func (s *Store) GetExecution(ctx context.Context, sessionID, id string) (Executi
 }
 
 func (s *Store) GetExecutionByID(ctx context.Context, id string) (Execution, error) {
-	e, err := scanExecution(s.db.QueryRowContext(ctx, executionSelect+` WHERE e.id=?`, id))
+	e, err := scanExecution(s.queryRow(ctx, executionSelect+` WHERE e.id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return e, ErrNotFound
 	}
 	return e, err
 }
 func (s *Store) ListExecutions(ctx context.Context, limit int) ([]Execution, error) {
-	rows, err := s.db.QueryContext(ctx, executionSelect+` ORDER BY e.created_at DESC LIMIT ?`, limit)
+	rows, err := s.query(ctx, executionSelect+` ORDER BY e.created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +601,7 @@ func (s *Store) ListExecutions(ctx context.Context, limit int) ([]Execution, err
 	return items, rows.Err()
 }
 func (s *Store) ListSessionExecutions(ctx context.Context, sessionID string) ([]Execution, error) {
-	rows, err := s.db.QueryContext(ctx, executionSelect+` WHERE e.session_id=? ORDER BY e.created_at`, sessionID)
+	rows, err := s.query(ctx, executionSelect+` WHERE e.session_id=? ORDER BY e.created_at`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -341,7 +618,7 @@ func (s *Store) ListSessionExecutions(ctx context.Context, sessionID string) ([]
 }
 
 func (s *Store) ListSessions(ctx context.Context) ([]AgentSession, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT s.id,s.title,s.created_at,s.updated_at,COUNT(e.id),COALESCE(MAX(CASE WHEN e.status IN ('failed','timeout') THEN 1 ELSE 0 END),0) FROM agent_sessions s LEFT JOIN executions e ON e.session_id=s.id GROUP BY s.id ORDER BY s.updated_at DESC`)
+	rows, err := s.query(ctx, `SELECT s.id,s.title,s.agent_credential_id,c.name,s.created_at,s.updated_at,COUNT(e.id),COALESCE(MAX(CASE WHEN e.status IN ('failed','timeout') THEN 1 ELSE 0 END),0) FROM agent_sessions s LEFT JOIN agent_credentials c ON c.id=s.agent_credential_id LEFT JOIN executions e ON e.session_id=s.id GROUP BY s.id,s.title,s.agent_credential_id,c.name,s.created_at,s.updated_at ORDER BY s.updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -351,10 +628,12 @@ func (s *Store) ListSessions(ctx context.Context) ([]AgentSession, error) {
 		var x AgentSession
 		var c, u string
 		var bad int
-		if err := rows.Scan(&x.ID, &x.Title, &c, &u, &x.ExecutionCount, &bad); err != nil {
+		var credentialID, credentialName sql.NullString
+		if err := rows.Scan(&x.ID, &x.Title, &credentialID, &credentialName, &c, &u, &x.ExecutionCount, &bad); err != nil {
 			return nil, err
 		}
 		x.CreatedAt = parseTime(c)
+		x.AgentCredentialID, x.AgentCredentialName = credentialID.String, credentialName.String
 		x.UpdatedAt = parseTime(u)
 		x.HasError = bad != 0
 		items = append(items, x)
@@ -365,7 +644,8 @@ func (s *Store) GetSession(ctx context.Context, id string) (AgentSession, error)
 	var x AgentSession
 	var c, u string
 	var bad int
-	err := s.db.QueryRowContext(ctx, `SELECT s.id,s.title,s.created_at,s.updated_at,COUNT(e.id),COALESCE(MAX(CASE WHEN e.status IN ('failed','timeout') THEN 1 ELSE 0 END),0) FROM agent_sessions s LEFT JOIN executions e ON e.session_id=s.id WHERE s.id=? GROUP BY s.id`, id).Scan(&x.ID, &x.Title, &c, &u, &x.ExecutionCount, &bad)
+	var credentialID, credentialName sql.NullString
+	err := s.queryRow(ctx, `SELECT s.id,s.title,s.agent_credential_id,c.name,s.created_at,s.updated_at,COUNT(e.id),COALESCE(MAX(CASE WHEN e.status IN ('failed','timeout') THEN 1 ELSE 0 END),0) FROM agent_sessions s LEFT JOIN agent_credentials c ON c.id=s.agent_credential_id LEFT JOIN executions e ON e.session_id=s.id WHERE s.id=? GROUP BY s.id,s.title,s.agent_credential_id,c.name,s.created_at,s.updated_at`, id).Scan(&x.ID, &x.Title, &credentialID, &credentialName, &c, &u, &x.ExecutionCount, &bad)
 	if errors.Is(err, sql.ErrNoRows) {
 		return x, ErrNotFound
 	}
@@ -373,6 +653,7 @@ func (s *Store) GetSession(ctx context.Context, id string) (AgentSession, error)
 		return x, fmt.Errorf("get session: %w", err)
 	}
 	x.CreatedAt = parseTime(c)
+	x.AgentCredentialID, x.AgentCredentialName = credentialID.String, credentialName.String
 	x.UpdatedAt = parseTime(u)
 	x.HasError = bad != 0
 	return x, nil
