@@ -4,7 +4,7 @@
 
 ## 当前已实现
 
-- localhost 管理页面默认以本机管理员身份打开，无需登录
+- Local 模式免登录；Server 模式使用固定 `admin` 用户与内存登录会话
 - 首次启动自动生成 Agent Token，并在“Agent 接入”页面提供一次性展示和重新生成功能
 - 目标主机管理（私钥或用户名 + 密码认证、可选的 Host Key 指纹校验）
 - 目标主机可逻辑删除；删除后不再允许新执行，历史执行记录仍保留原主机关联
@@ -21,7 +21,7 @@
 - `local` / `server` 双模式，以及 SQLite / PostgreSQL / MySQL 编号数据库迁移
 - `/readyz` 数据库就绪检查和动态运行模式标识
 
-Server 模式目前仍处于分阶段开发中，管理员登录和具名 Agent 权限将在后续阶段加入。在此之前 Server 模式同样只允许监听回环地址。初版暂不包含审批、记录清理、SSO 和 S3。
+Server 模式目前仍处于分阶段开发中：管理员登录已实现，具名 Agent 权限将在后续阶段加入。初版暂不包含审批、记录清理、SSO 和 S3。
 
 ## 构建与运行
 
@@ -39,14 +39,16 @@ go build -o ssh-bridge ./cmd/ssh-bridge
 
 首次启动会生成 Agent Token 并以 `0600` 权限保存到数据目录的 `agent-token` 文件中。完整 Token 只会在“Agent 接入”页面首次读取时展示一次；重新生成后旧 Token 立即失效。也可以在数据目录尚未初始化时用 `SSH_BRIDGE_AGENT_TOKEN` 提供初始值，之后以本地 Token 文件为准。
 
-### Server 模式（阶段一）
+### Server 模式（阶段二）
 
-阶段一可使用 PostgreSQL 或 MySQL 保存元数据，但仍沿用现有的单 Agent Token，并且管理页面尚未增加登录保护，因此只能监听 localhost。数据库类型从连接地址协议自动识别。
+Server 模式可使用 PostgreSQL 或 MySQL 保存元数据，管理页面必须以固定用户名 `admin` 登录。密码通过 `SSH_BRIDGE_ADMIN_PASSWORD` 注入，不写入数据库；会话仅保存在进程内，12 小时后或服务重启后失效。Agent 目前仍沿用单个 Token。数据库类型从连接地址协议自动识别。
 
 PostgreSQL：
 
 ```bash
 export SSH_BRIDGE_DATABASE_URL='postgres://ssh_bridge:password@127.0.0.1:5432/ssh_bridge?sslmode=disable'
+export SSH_BRIDGE_ADMIN_PASSWORD='replace-with-a-strong-password'
+export SSH_BRIDGE_COOKIE_SECURE=false # 仅用于 localhost HTTP 验收
 ./ssh-bridge --mode server --listen 127.0.0.1:7408 --data-dir ./ssh-bridge-data
 ```
 
@@ -54,14 +56,16 @@ MySQL：
 
 ```bash
 export SSH_BRIDGE_DATABASE_URL='mysql://ssh_bridge:password@127.0.0.1:3306/ssh_bridge?charset=utf8mb4'
+export SSH_BRIDGE_ADMIN_PASSWORD='replace-with-a-strong-password'
+export SSH_BRIDGE_COOKIE_SECURE=false # 仅用于 localhost HTTP 验收
 ./ssh-bridge --mode server --listen 127.0.0.1:7408 --data-dir ./ssh-bridge-data
 ```
 
-服务启动时会自动执行尚未应用的编号迁移。`GET /healthz` 表示进程存活，`GET /readyz` 会实际检查数据库连接。执行输出和上传文件仍写入 `--data-dir`，不会写入外部数据库。当前阶段不要把管理端口暴露到其他机器或公网。
+服务启动时会自动执行尚未应用的编号迁移。`GET /healthz` 表示进程存活，`GET /readyz` 会实际检查数据库连接。执行输出和上传文件仍写入 `--data-dir`，不会写入外部数据库。生产环境默认使用 Secure、HttpOnly、SameSite=Strict Cookie；只有通过反向代理终止 HTTPS 并正确传递原始 `Host` 后，才应使用 `--listen 0.0.0.0:7408`。不要直接以明文 HTTP 对外提供登录入口，公网限流也应由反向代理处理。
 
 首次运行建议按以下顺序操作：
 
-1. 打开 `http://127.0.0.1:7408/agent-access`，复制首次生成的 Token 和 Agent 配置。
+1. 打开 `http://127.0.0.1:7408`，以 `admin` 和配置的密码登录，再进入“Agent 接入”复制首次生成的 Token。
 2. 在“目标主机”中添加主机并测试 SSH 登录。
 3. 在 Agent 中添加 MCP Server 后，先调用 `list_targets` 确认连接，再执行简单只读命令。
 

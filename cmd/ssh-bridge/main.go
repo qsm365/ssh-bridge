@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"ssh-bridge/internal/config"
@@ -24,6 +25,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	cookieSecure := true
+	if raw, set := os.LookupEnv("SSH_BRIDGE_COOKIE_SECURE"); set {
+		cookieSecure, err = strconv.ParseBool(raw)
+		if err != nil {
+			log.Fatal("SSH_BRIDGE_COOKIE_SECURE must be true or false")
+		}
+	}
 
 	cfg := config.Config{
 		Mode:             *mode,
@@ -32,6 +40,8 @@ func main() {
 		DatabaseURL:      os.Getenv("SSH_BRIDGE_DATABASE_URL"),
 		AgentToken:       token,
 		RevealAgentToken: generated,
+		AdminPassword:    os.Getenv("SSH_BRIDGE_ADMIN_PASSWORD"),
+		InsecureCookie:   !cookieSecure,
 		CommandTimeout:   10 * time.Minute,
 	}
 	if err := cfg.Validate(); err != nil {

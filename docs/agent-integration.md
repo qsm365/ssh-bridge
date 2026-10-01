@@ -26,7 +26,7 @@ MCP 使用与 HTTP API 相同的 Bearer Token。服务采用无状态协议，�
 
 `execute_command.files` 可携带文件，每项包含 `name`、`filename` 和 `content_base64`。命令仍只能使用 `{{file:name}}` 占位符，不能指定远端路径。单个文件最多 16 MiB，一次最多 8 个。
 
-服务支持 MCP `2026-07-28` 的无状态请求形式，同时兼容仍会发送 `initialize` / `notifications/initialized` 的旧客户端。由于本地管理页面没有登录步骤，MCP 端点仍强制要求 Agent Token，并拒绝来自非 localhost 网页的 Origin。
+服务支持 MCP `2026-07-28` 的无状态请求形式，同时兼容仍会发送 `initialize` / `notifications/initialized` 的旧客户端。Local 管理页面免登录，Server 管理页面要求管理员登录；两种模式的 MCP 端点均强制要求 Agent Token，并拒绝来自非 localhost 网页的 Origin。
 
 ## 推荐调用流程
 

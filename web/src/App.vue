@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { api, type SystemInfo } from './api'
 
 const route = useRoute()
+const router = useRouter()
 const mobileNavOpen = ref(false)
+const logoutError = ref('')
 const systemInfo = ref<SystemInfo>({ mode: 'local', database: 'sqlite', mock: false, openapi_url: '/api/openapi.json', mcp_url: '/mcp' })
 
 onMounted(async () => {
@@ -29,10 +31,17 @@ const pageTitle = computed(() => {
   if (route.path === '/agent-access') return 'Agent 接入'
   return 'SSH Bridge'
 })
+
+async function logout() {
+  logoutError.value = ''
+  try { await api.logout(); await router.replace('/login') }
+  catch (cause) { logoutError.value = cause instanceof Error ? cause.message : '退出失败' }
+}
 </script>
 
 <template>
-  <div class="app-shell">
+  <RouterView v-if="route.path === '/login'" />
+  <div v-else class="app-shell">
     <aside class="sidebar" :class="{ open: mobileNavOpen }">
       <div class="brand">
         <div class="brand-mark">S</div>
@@ -65,7 +74,9 @@ const pageTitle = computed(() => {
         <div class="user-card">
           <div class="avatar">A</div>
           <div><strong>admin</strong><span>系统管理员</span></div>
+          <button v-if="systemInfo.mode === 'server'" class="logout-button" @click="logout">退出</button>
         </div>
+        <small v-if="logoutError" class="logout-error">{{ logoutError }}</small>
       </div>
     </aside>
 

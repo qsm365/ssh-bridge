@@ -36,6 +36,9 @@ type App struct {
 	cfg          config.Config
 	store        *store.Store
 	runner       *executor.Runner
+	adminHash    [32]byte
+	sessionMu    sync.Mutex
+	sessions     map[string]time.Time
 	tokenMu      sync.RWMutex
 	agentToken   string
 	oneTimeToken string
@@ -72,7 +75,9 @@ func New(cfg config.Config, data *store.Store) *http.Server {
 	if cfg.Mode == "" {
 		cfg.Mode = config.ModeLocal
 	}
-	a := &App{cfg: cfg, store: data, runner: &executor.Runner{Store: data, OutputDir: cfg.OutputDir(), Timeout: cfg.CommandTimeout}, agentToken: cfg.AgentToken}
+	adminHash := sha256.Sum256([]byte(cfg.AdminPassword))
+	cfg.AdminPassword = ""
+	a := &App{cfg: cfg, store: data, runner: &executor.Runner{Store: data, OutputDir: cfg.OutputDir(), Timeout: cfg.CommandTimeout}, adminHash: adminHash, sessions: make(map[string]time.Time), agentToken: cfg.AgentToken}
 	if cfg.RevealAgentToken {
 		a.oneTimeToken = cfg.AgentToken
 	}
@@ -83,6 +88,9 @@ func New(cfg config.Config, data *store.Store) *http.Server {
 	})
 	mux.HandleFunc("GET /readyz", a.ready)
 	mux.HandleFunc("GET /api/v1/system/info", a.systemInfo)
+	mux.HandleFunc("POST /api/v1/auth/login", a.login)
+	mux.HandleFunc("GET /api/v1/auth/me", a.admin(a.me))
+	mux.HandleFunc("POST /api/v1/auth/logout", a.admin(a.logout))
 	mux.HandleFunc("GET /api/v1/agent-token", a.admin(a.getAgentToken))
 	mux.HandleFunc("POST /api/v1/agent-token/regenerate", a.admin(a.regenerateAgentToken))
 	mux.HandleFunc("GET /api/openapi.json", a.openAPI)
@@ -103,7 +111,7 @@ func New(cfg config.Config, data *store.Store) *http.Server {
 	mux.HandleFunc("GET /api/v1/sessions/{sessionID}/executions/{executionID}", a.authorized(a.getExecution))
 	mux.HandleFunc("GET /api/v1/sessions/{sessionID}/executions/{executionID}/wait", a.authorized(a.waitExecution))
 	mux.HandleFunc("GET /api/v1/sessions/{sessionID}/executions/{executionID}/output", a.authorized(a.getExecutionOutput))
-	mux.Handle("/", spaHandler())
+	mux.Handle("/", a.adminPage(spaHandler()))
 	return &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 75 * time.Second}
 }
 
@@ -178,9 +186,6 @@ func (a *App) regenerateAgentToken(w http.ResponseWriter, _ *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"configured": true, "token": token, "token_visible": true, "mcp_url": "/mcp",
 	})
-}
-func (a *App) admin(next http.HandlerFunc) http.HandlerFunc {
-	return next
 }
 func (a *App) authorized(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

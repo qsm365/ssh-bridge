@@ -24,6 +24,8 @@ type Config struct {
 	DatabaseURL      string
 	AgentToken       string
 	RevealAgentToken bool
+	AdminPassword    string
+	InsecureCookie   bool
 	CommandTimeout   time.Duration
 }
 
@@ -36,11 +38,11 @@ func (c Config) Validate() error {
 		return errors.New("listen address must include host and port")
 	}
 	ip := net.ParseIP(host)
-	if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
-		if c.Mode == ModeServer {
-			return errors.New("server mode must listen on localhost or a loopback address until administrator authentication is enabled")
-		}
+	if c.Mode == ModeLocal && !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
 		return errors.New("local mode must listen on localhost or a loopback address")
+	}
+	if c.Mode == ModeServer && strings.TrimSpace(c.AdminPassword) == "" {
+		return errors.New("SSH_BRIDGE_ADMIN_PASSWORD is required in server mode")
 	}
 	if c.Mode == ModeServer && strings.TrimSpace(c.DatabaseURL) == "" {
 		return errors.New("SSH_BRIDGE_DATABASE_URL is required in server mode")

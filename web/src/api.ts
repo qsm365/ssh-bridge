@@ -3,6 +3,9 @@ import type { AuditSession, Execution, Target } from './types'
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api/v1${path}`, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...init?.headers }, ...init })
   if (!response.ok) {
+	if (response.status === 401 && path !== '/auth/me' && path !== '/auth/login' && window.location.pathname !== '/login') {
+		window.location.assign(`/login?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`)
+	}
     const body = await response.json().catch(() => ({ error: `请求失败 (${response.status})` }))
     throw new Error(body.error || `请求失败 (${response.status})`)
   }
@@ -12,6 +15,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   systemInfo: () => request<SystemInfo>('/system/info'),
+  authMe: () => request<{ username: string }>('/auth/me'),
+  login: (password: string) => request<{ username: string }>('/auth/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password }) }),
+  logout: () => request<void>('/auth/logout', { method: 'POST' }),
   targets: () => request<{ items: Target[] }>('/targets'),
   createTarget: (body: object) => request<Target>('/targets', { method: 'POST', body: JSON.stringify(body) }),
   updateTarget: (id: string, body: object) => request<Target>(`/targets/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
