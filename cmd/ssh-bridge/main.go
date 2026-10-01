@@ -21,9 +21,14 @@ func main() {
 	if err := os.MkdirAll(filepath.Clean(*dataDir), 0o700); err != nil {
 		log.Fatal(err)
 	}
-	token, generated, err := config.LoadOrCreateAgentToken(*dataDir, os.Getenv("SSH_BRIDGE_AGENT_TOKEN"))
-	if err != nil {
-		log.Fatal(err)
+	var token string
+	var generated bool
+	var err error
+	if *mode == config.ModeLocal {
+		token, generated, err = config.LoadOrCreateAgentToken(*dataDir, os.Getenv("SSH_BRIDGE_AGENT_TOKEN"))
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 	cookieSecure := true
 	if raw, set := os.LookupEnv("SSH_BRIDGE_COOKIE_SECURE"); set {

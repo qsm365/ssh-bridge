@@ -5,7 +5,8 @@
 ## 当前已实现
 
 - Local 模式免登录；Server 模式使用固定 `admin` 用户与内存登录会话
-- 首次启动自动生成 Agent Token，并在“Agent 接入”页面提供一次性展示和重新生成功能
+- Local 模式首次启动自动生成 Agent Token，并在“Agent 接入”页面提供一次性展示和重新生成功能
+- Server 模式支持多个具名 Agent Token、目标主机授权，以及会话和执行的调用凭据归属
 - 目标主机管理（私钥或用户名 + 密码认证、可选的 Host Key 指纹校验）
 - 目标主机可逻辑删除；删除后不再允许新执行，历史执行记录仍保留原主机关联
 - 保存前及保存后的 SSH 登录联通性测试（不执行远程命令）
@@ -21,7 +22,7 @@
 - `local` / `server` 双模式，以及 SQLite / PostgreSQL / MySQL 编号数据库迁移
 - `/readyz` 数据库就绪检查和动态运行模式标识
 
-Server 模式目前仍处于分阶段开发中：管理员登录已实现，具名 Agent 权限将在后续阶段加入。初版暂不包含审批、记录清理、SSO 和 S3。
+Server 模式目前仍处于分阶段开发中：具名凭据管理 API 已实现，管理页面将在下一阶段加入。初版暂不包含审批、记录清理、SSO 和 S3。
 
 ## 构建与运行
 
@@ -37,11 +38,11 @@ go build -o ssh-bridge ./cmd/ssh-bridge
 
 访问 `http://127.0.0.1:7408` 后直接进入管理页面。为了避免无登录管理台暴露到网络，本地模式只允许监听 localhost 或其他回环地址。
 
-首次启动会生成 Agent Token 并以 `0600` 权限保存到数据目录的 `agent-token` 文件中。完整 Token 只会在“Agent 接入”页面首次读取时展示一次；重新生成后旧 Token 立即失效。也可以在数据目录尚未初始化时用 `SSH_BRIDGE_AGENT_TOKEN` 提供初始值，之后以本地 Token 文件为准。
+Local 模式首次启动会生成 Agent Token 并以 `0600` 权限保存到数据目录的 `agent-token` 文件中。完整 Token 只会在“Agent 接入”页面首次读取时展示一次；重新生成后旧 Token 立即失效。也可以在数据目录尚未初始化时用 `SSH_BRIDGE_AGENT_TOKEN` 提供初始值，之后以本地 Token 文件为准。
 
-### Server 模式（阶段二）
+### Server 模式（阶段三）
 
-Server 模式可使用 PostgreSQL 或 MySQL 保存元数据，管理页面必须以固定用户名 `admin` 登录。密码通过 `SSH_BRIDGE_ADMIN_PASSWORD` 注入，不写入数据库；会话仅保存在进程内，12 小时后或服务重启后失效。Agent 目前仍沿用单个 Token。数据库类型从连接地址协议自动识别。
+Server 模式可使用 PostgreSQL 或 MySQL 保存元数据，管理页面必须以固定用户名 `admin` 登录。密码通过 `SSH_BRIDGE_ADMIN_PASSWORD` 注入，不写入数据库；会话仅保存在进程内，12 小时后或服务重启后失效。Agent 使用管理员创建的具名 Token，不再使用 Local 模式的全局 Token。数据库类型从连接地址协议自动识别。
 
 PostgreSQL：
 
@@ -65,9 +66,12 @@ export SSH_BRIDGE_COOKIE_SECURE=false # 仅用于 localhost HTTP 验收
 
 首次运行建议按以下顺序操作：
 
-1. 打开 `http://127.0.0.1:7408`，以 `admin` 和配置的密码登录，再进入“Agent 接入”复制首次生成的 Token。
+1. 打开 `http://127.0.0.1:7408`，以 `admin` 和配置的密码登录。
 2. 在“目标主机”中添加主机并测试 SSH 登录。
-3. 在 Agent 中添加 MCP Server 后，先调用 `list_targets` 确认连接，再执行简单只读命令。
+3. 使用下述管理 API 创建具名 Agent 凭据，保存仅返回一次的 Token；凭据管理页面将在下一阶段加入。
+4. 在 Agent 中添加 MCP Server 后，先调用 `list_targets` 确认授权主机，再执行简单只读命令。
+
+管理员登录 Cookie 配合同源 `Origin` 调用凭据管理 API：`GET/POST /api/v1/agent-credentials`、`PUT /api/v1/agent-credentials/{id}`、`POST /api/v1/agent-credentials/{id}/regenerate`。创建请求示例为 `{"name":"运维 Agent","target_ids":["target_..."],"enabled":true}`；修改时传入完整的 `name`、`target_ids` 和 `enabled`。创建及轮换响应中的完整 Token 只显示一次，数据库只保存 SHA-256 摘要和前缀。禁用凭据或轮换后旧 Token 立即失效；移除主机权限后不能再执行，但仍可用同一凭据读取历史记录。
 
 ## Agent 调用流程
 

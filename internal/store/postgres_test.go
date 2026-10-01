@@ -36,13 +36,23 @@ func testExternalDatabase(t *testing.T, databaseName, databaseURL string, opener
 	if err := s.queryRow(ctx, `SELECT version FROM schema_migrations WHERE version=?`, 1).Scan(&migrationVersion); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.queryRow(ctx, `SELECT version FROM schema_migrations WHERE version=?`, 4).Scan(&migrationVersion); err != nil {
+		t.Fatal(err)
+	}
 
 	suffix := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
 	target := Target{ID: "target_" + suffix, Name: databaseName + "-test", Host: "127.0.0.1", Port: 22, SSHUser: "root", PrivateKeyPath: "/missing", Enabled: true}
 	if err := s.SaveTarget(ctx, target); err != nil {
 		t.Fatal(err)
 	}
-	session := AgentSession{ID: "session_" + suffix, Title: databaseName + " test"}
+	credential := AgentCredential{ID: "credential_" + suffix, Name: databaseName + " Agent", TokenPrefix: "sb_test", Enabled: true, TargetIDs: []string{target.ID}}
+	if err := s.CreateAgentCredential(ctx, credential, "test_hash_"+suffix); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := s.CredentialCanAccessTarget(ctx, credential.ID, target.ID); err != nil || !allowed {
+		t.Fatalf("credential target access = %v, %v", allowed, err)
+	}
+	session := AgentSession{ID: "session_" + suffix, Title: databaseName + " test", AgentCredentialID: credential.ID}
 	execution := Execution{ID: "execution_" + suffix, SessionID: session.ID, TargetID: target.ID, Command: "uptime", Status: "pending", CreatedAt: time.Now().UTC()}
 	if err := s.CreateExecution(ctx, session, execution, nil, true); err != nil {
 		t.Fatal(err)
@@ -65,5 +75,8 @@ func testExternalDatabase(t *testing.T, databaseName, databaseURL string, opener
 	}
 	if got.Status != "failed" || got.FinishedAt == nil {
 		t.Fatalf("recovered execution = %+v, want failed with finished_at", got)
+	}
+	if got.AgentCredentialID != credential.ID || got.AgentCredentialName != credential.Name {
+		t.Fatalf("recovered attribution = %+v", got)
 	}
 }

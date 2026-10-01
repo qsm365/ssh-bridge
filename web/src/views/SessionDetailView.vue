@@ -12,7 +12,7 @@ onMounted(async()=>{try{const data=await api.session(String(route.params.id));se
   <div v-if="loading" class="panel empty-state">正在加载…</div><div v-else-if="error" class="panel empty-state">{{ error }}</div>
   <template v-else-if="session">
     <section class="detail-hero session-hero"><div><div class="eyebrow">会话 #{{ session.id.slice(-10) }}</div><h2>{{ session.title || '未命名会话' }}</h2><p>{{ session.id }}</p></div><span v-if="session.has_error" class="session-status attention">有异常</span></section>
-    <section class="session-summary-grid"><div><span>开始时间</span><strong>{{ formatTime(session.created_at) }}</strong></div><div><span>最近活动</span><strong>{{ formatTime(session.updated_at) }}</strong></div><div><span>SSH 调用</span><strong>{{ session.execution_count }} 次</strong></div></section>
+    <section class="session-summary-grid"><div><span>开始时间</span><strong>{{ formatTime(session.created_at) }}</strong></div><div><span>最近活动</span><strong>{{ formatTime(session.updated_at) }}</strong></div><div><span>SSH 调用</span><strong>{{ session.execution_count }} 次</strong></div><div v-if="session.agent_credential_name"><span>调用 Agent</span><strong>{{ session.agent_credential_name }}</strong></div></section>
     <section class="panel conversation-note"><span>关于会话标题</span><p>{{ session.title || 'Agent 未提供会话标题' }}</p><small>标题由调用方选填；SSH Bridge 不保存用户与 AI 的完整聊天内容。</small></section>
     <section class="panel session-executions"><div class="panel-heading"><div><h2>本次会话的执行时间线</h2><p>按照 Bridge 实际接收和执行的时间排序</p></div></div>
       <div v-if="!executions.length" class="empty-state">尚无执行记录</div><div v-else class="conversation-timeline">

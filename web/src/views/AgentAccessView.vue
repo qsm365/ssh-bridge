@@ -8,6 +8,7 @@ const loading = ref(true)
 const rotating = ref(false)
 const error = ref('')
 const copied = ref('')
+const serverMode = ref(false)
 
 const mcpURL = computed(() => info.value ? `${window.location.origin}${info.value.mcp_url}` : '')
 const codexConfig = computed(() => `[mcp_servers.ssh_bridge]
@@ -20,7 +21,10 @@ const tokenCommand = computed(() => info.value?.token ? `export SSH_BRIDGE_AGENT
 async function load() {
   loading.value = true
   error.value = ''
-  try { info.value = await api.agentToken() }
+  try {
+    serverMode.value = (await api.systemInfo()).mode === 'server'
+    if (!serverMode.value) info.value = await api.agentToken()
+  }
   catch (cause) { error.value = cause instanceof Error ? cause.message : '加载失败' }
   finally { loading.value = false }
 }
@@ -47,10 +51,11 @@ onMounted(load)
 
 <template>
   <section class="page-intro">
-    <div><h2>Agent 接入</h2><p>连接 MCP Server，并管理本机 Agent 使用的访问 Token</p></div>
+    <div><h2>Agent 接入</h2><p>{{ serverMode ? 'Server 模式使用具名 Agent 凭据和主机授权' : '连接 MCP Server，并管理本机 Agent 使用的访问 Token' }}</p></div>
   </section>
 
   <div v-if="loading" class="panel empty-state">正在加载…</div>
+  <div v-else-if="serverMode" class="panel empty-state">具名凭据管理接口已可用；创建、授权与轮换的页面将在下一阶段加入。当前可通过管理 API 验收。</div>
   <p v-else-if="error && !info" class="form-error panel">{{ error }}</p>
   <div v-else-if="info" class="access-layout">
     <section class="panel access-section">

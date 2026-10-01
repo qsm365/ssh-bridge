@@ -93,6 +93,10 @@ func New(cfg config.Config, data *store.Store) *http.Server {
 	mux.HandleFunc("POST /api/v1/auth/logout", a.admin(a.logout))
 	mux.HandleFunc("GET /api/v1/agent-token", a.admin(a.getAgentToken))
 	mux.HandleFunc("POST /api/v1/agent-token/regenerate", a.admin(a.regenerateAgentToken))
+	mux.HandleFunc("GET /api/v1/agent-credentials", a.admin(a.listAgentCredentials))
+	mux.HandleFunc("POST /api/v1/agent-credentials", a.admin(a.createAgentCredential))
+	mux.HandleFunc("PUT /api/v1/agent-credentials/{id}", a.admin(a.updateAgentCredential))
+	mux.HandleFunc("POST /api/v1/agent-credentials/{id}/regenerate", a.admin(a.regenerateAgentCredential))
 	mux.HandleFunc("GET /api/openapi.json", a.openAPI)
 	mux.HandleFunc("/mcp", a.authorized(a.mcp))
 	mux.HandleFunc("GET /api/v1/agent/targets", a.authorized(a.listAgentTargets))
@@ -164,6 +168,10 @@ func (a *App) hasAgentToken(r *http.Request) bool {
 }
 
 func (a *App) getAgentToken(w http.ResponseWriter, _ *http.Request) {
+	if a.cfg.Mode == config.ModeServer {
+		apiError(w, http.StatusNotFound, "local token is unavailable in server mode")
+		return
+	}
 	a.tokenMu.Lock()
 	token := a.oneTimeToken
 	a.oneTimeToken = ""
@@ -174,6 +182,10 @@ func (a *App) getAgentToken(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *App) regenerateAgentToken(w http.ResponseWriter, _ *http.Request) {
+	if a.cfg.Mode == config.ModeServer {
+		apiError(w, http.StatusNotFound, "local token is unavailable in server mode")
+		return
+	}
 	token, err := config.ReplaceAgentToken(a.cfg.DataDir)
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, err.Error())
@@ -189,6 +201,19 @@ func (a *App) regenerateAgentToken(w http.ResponseWriter, _ *http.Request) {
 }
 func (a *App) authorized(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if a.cfg.Mode == config.ModeServer {
+			credentialID, err := a.authenticateCredential(r)
+			if err != nil {
+				apiError(w, http.StatusInternalServerError, "credential lookup failed")
+				return
+			}
+			if credentialID == "" {
+				apiError(w, http.StatusUnauthorized, "authentication required")
+				return
+			}
+			next(w, r.WithContext(context.WithValue(r.Context(), credentialContextKey{}, credentialID)))
+			return
+		}
 		if !a.hasAgentToken(r) {
 			apiError(w, http.StatusUnauthorized, "authentication required")
 			return
@@ -314,6 +339,16 @@ func (a *App) listAgentTargets(w http.ResponseWriter, r *http.Request) {
 	for _, target := range targets {
 		if !target.Enabled {
 			continue
+		}
+		if credentialID := credentialFromContext(r.Context()); credentialID != "" {
+			allowed, err := a.store.CredentialCanAccessTarget(r.Context(), credentialID, target.ID)
+			if err != nil {
+				apiError(w, 500, "target authorization failed")
+				return
+			}
+			if !allowed {
+				continue
+			}
 		}
 		items = append(items, map[string]any{"id": target.ID, "name": target.Name, "ssh_user": target.SSHUser, "description": target.Description})
 	}
@@ -514,6 +549,16 @@ func (a *App) startExecution(ctx context.Context, req executionRequest, uploads 
 	if !target.Enabled {
 		return acceptedExecution{}, http.StatusConflict, errors.New("target is disabled")
 	}
+	credentialID := credentialFromContext(ctx)
+	if a.cfg.Mode == config.ModeServer {
+		allowed, err := a.store.CredentialCanAccessTarget(ctx, credentialID, target.ID)
+		if err != nil {
+			return acceptedExecution{}, 500, err
+		}
+		if !allowed {
+			return acceptedExecution{}, http.StatusForbidden, errors.New("target is not authorized")
+		}
+	}
 	createSession := req.SessionID == ""
 	sessionID := req.SessionID
 	if createSession {
@@ -532,7 +577,7 @@ func (a *App) startExecution(ctx context.Context, req executionRequest, uploads 
 	if err != nil {
 		return acceptedExecution{}, http.StatusInternalServerError, err
 	}
-	session := store.AgentSession{ID: sessionID, Title: strings.TrimSpace(req.SessionTitle), CreatedAt: now, UpdatedAt: now}
+	session := store.AgentSession{ID: sessionID, Title: strings.TrimSpace(req.SessionTitle), AgentCredentialID: credentialID, CreatedAt: now, UpdatedAt: now}
 	if session.Title == "" {
 		session.Title = e.Title
 	}
@@ -660,6 +705,9 @@ func (a *App) archiveUploads(uploads []uploadedFile, execution store.Execution) 
 	return artifacts, dir, nil
 }
 func (a *App) getExecution(w http.ResponseWriter, r *http.Request) {
+	if !a.requireExecutionOwner(w, r) {
+		return
+	}
 	e, err := a.store.GetExecution(r.Context(), r.PathValue("sessionID"), r.PathValue("executionID"))
 	if errors.Is(err, store.ErrNotFound) {
 		apiError(w, 404, "execution not found")
@@ -709,6 +757,9 @@ func (a *App) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, artifact.OriginalName, artifact.CreatedAt, file)
 }
 func (a *App) getExecutionOutput(w http.ResponseWriter, r *http.Request) {
+	if !a.requireExecutionOwner(w, r) {
+		return
+	}
 	e, err := a.store.GetExecution(r.Context(), r.PathValue("sessionID"), r.PathValue("executionID"))
 	if errors.Is(err, store.ErrNotFound) {
 		apiError(w, http.StatusNotFound, "execution not found")
@@ -757,6 +808,9 @@ func terminal(status string) bool {
 	return status == "succeeded" || status == "failed" || status == "timeout"
 }
 func (a *App) waitExecution(w http.ResponseWriter, r *http.Request) {
+	if !a.requireExecutionOwner(w, r) {
+		return
+	}
 	seconds := 55
 	if raw := r.URL.Query().Get("timeout"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n >= 1 && n <= 60 {

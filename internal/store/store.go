@@ -41,32 +41,36 @@ type Target struct {
 }
 
 type AgentSession struct {
-	ID             string    `json:"id"`
-	Title          string    `json:"title"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	ExecutionCount int       `json:"execution_count"`
-	HasError       bool      `json:"has_error"`
+	ID                  string    `json:"id"`
+	Title               string    `json:"title"`
+	AgentCredentialID   string    `json:"agent_credential_id,omitempty"`
+	AgentCredentialName string    `json:"agent_credential_name,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+	ExecutionCount      int       `json:"execution_count"`
+	HasError            bool      `json:"has_error"`
 }
 
 type Execution struct {
-	ID            string     `json:"id"`
-	SessionID     string     `json:"session_id"`
-	TargetID      string     `json:"target_id"`
-	TargetName    string     `json:"target_name,omitempty"`
-	Title         string     `json:"title"`
-	Command       string     `json:"command"`
-	WorkingDir    string     `json:"working_dir"`
-	Status        string     `json:"status"`
-	ExitCode      *int       `json:"exit_code"`
-	ErrorMessage  string     `json:"error_message,omitempty"`
-	OutputPath    string     `json:"-"`
-	OutputSize    int64      `json:"output_size"`
-	OutputPreview string     `json:"output_preview"`
-	CreatedAt     time.Time  `json:"created_at"`
-	StartedAt     *time.Time `json:"started_at"`
-	FinishedAt    *time.Time `json:"finished_at"`
-	Artifacts     []Artifact `json:"artifacts,omitempty"`
+	ID                  string     `json:"id"`
+	SessionID           string     `json:"session_id"`
+	TargetID            string     `json:"target_id"`
+	TargetName          string     `json:"target_name,omitempty"`
+	AgentCredentialID   string     `json:"agent_credential_id,omitempty"`
+	AgentCredentialName string     `json:"agent_credential_name,omitempty"`
+	Title               string     `json:"title"`
+	Command             string     `json:"command"`
+	WorkingDir          string     `json:"working_dir"`
+	Status              string     `json:"status"`
+	ExitCode            *int       `json:"exit_code"`
+	ErrorMessage        string     `json:"error_message,omitempty"`
+	OutputPath          string     `json:"-"`
+	OutputSize          int64      `json:"output_size"`
+	OutputPreview       string     `json:"output_preview"`
+	CreatedAt           time.Time  `json:"created_at"`
+	StartedAt           *time.Time `json:"started_at"`
+	FinishedAt          *time.Time `json:"finished_at"`
+	Artifacts           []Artifact `json:"artifacts,omitempty"`
 }
 
 type Artifact struct {
@@ -239,6 +243,10 @@ var sqlitePostgresMigrations = []migration{{version: 1, statements: []string{
 	`ALTER TABLE targets ADD COLUMN password_ciphertext TEXT`,
 }}, {version: 3, statements: []string{
 	`ALTER TABLE targets ADD COLUMN deleted_at TEXT`,
+}}, {version: 4, statements: []string{
+	`CREATE TABLE agent_credentials (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, token_prefix TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT)`,
+	`CREATE TABLE agent_credential_targets (agent_credential_id TEXT NOT NULL REFERENCES agent_credentials(id), target_id TEXT NOT NULL REFERENCES targets(id), PRIMARY KEY(agent_credential_id,target_id))`,
+	`ALTER TABLE agent_sessions ADD COLUMN agent_credential_id TEXT REFERENCES agent_credentials(id)`,
 }}}
 
 var mysqlMigrations = []migration{{version: 1, statements: []string{
@@ -270,6 +278,10 @@ var mysqlMigrations = []migration{{version: 1, statements: []string{
 	`ALTER TABLE targets ADD COLUMN auth_method VARCHAR(20) NOT NULL DEFAULT 'key', ADD COLUMN password_ciphertext TEXT`,
 }}, {version: 3, statements: []string{
 	`ALTER TABLE targets ADD COLUMN deleted_at VARCHAR(40)`,
+}}, {version: 4, statements: []string{
+	`CREATE TABLE agent_credentials (id VARCHAR(64) PRIMARY KEY, name VARCHAR(255) NOT NULL, token_hash VARCHAR(64) NOT NULL UNIQUE, token_prefix VARCHAR(32) NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL, last_used_at VARCHAR(40))`,
+	`CREATE TABLE agent_credential_targets (agent_credential_id VARCHAR(64) NOT NULL, target_id VARCHAR(64) NOT NULL, PRIMARY KEY(agent_credential_id,target_id), FOREIGN KEY (agent_credential_id) REFERENCES agent_credentials(id), FOREIGN KEY (target_id) REFERENCES targets(id))`,
+	`ALTER TABLE agent_sessions ADD COLUMN agent_credential_id VARCHAR(64) NULL, ADD CONSTRAINT fk_agent_sessions_credential FOREIGN KEY (agent_credential_id) REFERENCES agent_credentials(id)`,
 }}}
 
 func (s *Store) migrations() []migration {
@@ -453,12 +465,17 @@ func (s *Store) CreateExecution(ctx context.Context, session AgentSession, e Exe
 	defer tx.Rollback()
 	now := e.CreatedAt.UTC().Format(time.RFC3339Nano)
 	if createSession {
-		if _, err = tx.ExecContext(ctx, s.bind(`INSERT INTO agent_sessions(id,title,created_at,updated_at) VALUES(?,?,?,?)`), session.ID, session.Title, now, now); err != nil {
+		var owner any
+		if session.AgentCredentialID != "" {
+			owner = session.AgentCredentialID
+		}
+		if _, err = tx.ExecContext(ctx, s.bind(`INSERT INTO agent_sessions(id,title,created_at,updated_at,agent_credential_id) VALUES(?,?,?,?,?)`), session.ID, session.Title, now, now, owner); err != nil {
 			return err
 		}
 	} else {
 		var exists int
-		if err = tx.QueryRowContext(ctx, s.bind(`SELECT 1 FROM agent_sessions WHERE id=?`), e.SessionID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		owner := session.AgentCredentialID
+		if err = tx.QueryRowContext(ctx, s.bind(`SELECT 1 FROM agent_sessions WHERE id=? AND ((agent_credential_id=? ) OR (agent_credential_id IS NULL AND ?=''))`), e.SessionID, owner, owner).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		if err != nil {
@@ -534,7 +551,8 @@ func scanExecution(scanner interface{ Scan(...any) error }) (Execution, error) {
 	var exit sql.NullInt64
 	var created string
 	var started, finished sql.NullString
-	err := scanner.Scan(&e.ID, &e.SessionID, &e.TargetID, &e.TargetName, &e.Title, &e.Command, &e.WorkingDir, &e.Status, &exit, &e.ErrorMessage, &e.OutputPath, &e.OutputSize, &e.OutputPreview, &created, &started, &finished)
+	var credentialID, credentialName sql.NullString
+	err := scanner.Scan(&e.ID, &e.SessionID, &e.TargetID, &e.TargetName, &credentialID, &credentialName, &e.Title, &e.Command, &e.WorkingDir, &e.Status, &exit, &e.ErrorMessage, &e.OutputPath, &e.OutputSize, &e.OutputPreview, &created, &started, &finished)
 	if err != nil {
 		return e, err
 	}
@@ -542,13 +560,14 @@ func scanExecution(scanner interface{ Scan(...any) error }) (Execution, error) {
 		x := int(exit.Int64)
 		e.ExitCode = &x
 	}
+	e.AgentCredentialID, e.AgentCredentialName = credentialID.String, credentialName.String
 	e.CreatedAt = parseTime(created)
 	e.StartedAt = parseOptional(started)
 	e.FinishedAt = parseOptional(finished)
 	return e, nil
 }
 
-const executionSelect = `SELECT e.id,e.session_id,e.target_id,t.name,e.title,e.command,e.working_dir,e.status,e.exit_code,e.error_message,e.output_path,e.output_size,e.output_preview,e.created_at,e.started_at,e.finished_at FROM executions e JOIN targets t ON t.id=e.target_id`
+const executionSelect = `SELECT e.id,e.session_id,e.target_id,t.name,s.agent_credential_id,c.name,e.title,e.command,e.working_dir,e.status,e.exit_code,e.error_message,e.output_path,e.output_size,e.output_preview,e.created_at,e.started_at,e.finished_at FROM executions e JOIN targets t ON t.id=e.target_id JOIN agent_sessions s ON s.id=e.session_id LEFT JOIN agent_credentials c ON c.id=s.agent_credential_id`
 
 func (s *Store) GetExecution(ctx context.Context, sessionID, id string) (Execution, error) {
 	e, err := scanExecution(s.queryRow(ctx, executionSelect+` WHERE e.session_id=? AND e.id=?`, sessionID, id))
@@ -599,7 +618,7 @@ func (s *Store) ListSessionExecutions(ctx context.Context, sessionID string) ([]
 }
 
 func (s *Store) ListSessions(ctx context.Context) ([]AgentSession, error) {
-	rows, err := s.query(ctx, `SELECT s.id,s.title,s.created_at,s.updated_at,COUNT(e.id),COALESCE(MAX(CASE WHEN e.status IN ('failed','timeout') THEN 1 ELSE 0 END),0) FROM agent_sessions s LEFT JOIN executions e ON e.session_id=s.id GROUP BY s.id ORDER BY s.updated_at DESC`)
+	rows, err := s.query(ctx, `SELECT s.id,s.title,s.agent_credential_id,c.name,s.created_at,s.updated_at,COUNT(e.id),COALESCE(MAX(CASE WHEN e.status IN ('failed','timeout') THEN 1 ELSE 0 END),0) FROM agent_sessions s LEFT JOIN agent_credentials c ON c.id=s.agent_credential_id LEFT JOIN executions e ON e.session_id=s.id GROUP BY s.id,s.title,s.agent_credential_id,c.name,s.created_at,s.updated_at ORDER BY s.updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -609,10 +628,12 @@ func (s *Store) ListSessions(ctx context.Context) ([]AgentSession, error) {
 		var x AgentSession
 		var c, u string
 		var bad int
-		if err := rows.Scan(&x.ID, &x.Title, &c, &u, &x.ExecutionCount, &bad); err != nil {
+		var credentialID, credentialName sql.NullString
+		if err := rows.Scan(&x.ID, &x.Title, &credentialID, &credentialName, &c, &u, &x.ExecutionCount, &bad); err != nil {
 			return nil, err
 		}
 		x.CreatedAt = parseTime(c)
+		x.AgentCredentialID, x.AgentCredentialName = credentialID.String, credentialName.String
 		x.UpdatedAt = parseTime(u)
 		x.HasError = bad != 0
 		items = append(items, x)
@@ -623,7 +644,8 @@ func (s *Store) GetSession(ctx context.Context, id string) (AgentSession, error)
 	var x AgentSession
 	var c, u string
 	var bad int
-	err := s.queryRow(ctx, `SELECT s.id,s.title,s.created_at,s.updated_at,COUNT(e.id),COALESCE(MAX(CASE WHEN e.status IN ('failed','timeout') THEN 1 ELSE 0 END),0) FROM agent_sessions s LEFT JOIN executions e ON e.session_id=s.id WHERE s.id=? GROUP BY s.id`, id).Scan(&x.ID, &x.Title, &c, &u, &x.ExecutionCount, &bad)
+	var credentialID, credentialName sql.NullString
+	err := s.queryRow(ctx, `SELECT s.id,s.title,s.agent_credential_id,c.name,s.created_at,s.updated_at,COUNT(e.id),COALESCE(MAX(CASE WHEN e.status IN ('failed','timeout') THEN 1 ELSE 0 END),0) FROM agent_sessions s LEFT JOIN agent_credentials c ON c.id=s.agent_credential_id LEFT JOIN executions e ON e.session_id=s.id WHERE s.id=? GROUP BY s.id,s.title,s.agent_credential_id,c.name,s.created_at,s.updated_at`, id).Scan(&x.ID, &x.Title, &credentialID, &credentialName, &c, &u, &x.ExecutionCount, &bad)
 	if errors.Is(err, sql.ErrNoRows) {
 		return x, ErrNotFound
 	}
@@ -631,6 +653,7 @@ func (s *Store) GetSession(ctx context.Context, id string) (AgentSession, error)
 		return x, fmt.Errorf("get session: %w", err)
 	}
 	x.CreatedAt = parseTime(c)
+	x.AgentCredentialID, x.AgentCredentialName = credentialID.String, credentialName.String
 	x.UpdatedAt = parseTime(u)
 	x.HasError = bad != 0
 	return x, nil

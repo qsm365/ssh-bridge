@@ -50,7 +50,7 @@ func (c Config) Validate() error {
 	if c.Mode == ModeServer && c.DatabaseName() == "" {
 		return errors.New("SSH_BRIDGE_DATABASE_URL must use postgres://, postgresql://, or mysql://")
 	}
-	if c.AgentToken == "" {
+	if c.Mode == ModeLocal && c.AgentToken == "" {
 		return errors.New("SSH_BRIDGE_AGENT_TOKEN is required")
 	}
 	if c.CommandTimeout <= 0 {

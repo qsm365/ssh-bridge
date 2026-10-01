@@ -1,10 +1,12 @@
 # Agent 接入 SSH Bridge
 
-SSH Bridge 本地模式在 `/api/openapi.json` 提供随可执行文件发布的 OpenAPI 3.1 文档。Agent 请求使用：
+SSH Bridge 在 `/api/openapi.json` 提供随可执行文件发布的 OpenAPI 3.1 文档。Agent 请求使用：
 
 ```http
 Authorization: Bearer <SSH_BRIDGE_AGENT_TOKEN>
 ```
+
+Local 模式使用单个本地 Token；Server 模式由管理员创建具名 Token 并分配目标主机。Server 中只能列出和操作当前凭据获授权的主机；会话、执行和输出只允许创建它们的凭据查询。轮换 Token 不改变历史审计归属。
 
 ## MCP 接入
 

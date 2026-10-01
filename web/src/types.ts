@@ -5,6 +5,8 @@ export interface Execution {
   session_id: string
   target_id: string
   target_name: string
+  agent_credential_id?: string
+  agent_credential_name?: string
   title: string
   command: string
   working_dir: string
@@ -49,6 +51,8 @@ export interface Target {
 export interface AuditSession {
   id: string
   title: string
+  agent_credential_id?: string
+  agent_credential_name?: string
   created_at: string
   updated_at: string
   execution_count: number

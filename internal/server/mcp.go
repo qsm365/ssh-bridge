@@ -245,6 +245,15 @@ func (a *App) callMCPTool(ctx context.Context, call mcpToolCall) (any, error) {
 		items := make([]map[string]any, 0, len(targets))
 		for _, target := range targets {
 			if target.Enabled {
+				if credentialID := credentialFromContext(ctx); credentialID != "" {
+					allowed, err := a.store.CredentialCanAccessTarget(ctx, credentialID, target.ID)
+					if err != nil {
+						return nil, err
+					}
+					if !allowed {
+						continue
+					}
+				}
 				items = append(items, map[string]any{"id": target.ID, "name": target.Name, "ssh_user": target.SSHUser, "description": target.Description})
 			}
 		}
@@ -354,6 +363,15 @@ func decodeMCPFiles(command string, files []mcpFileInput) ([]uploadedFile, error
 func (a *App) loadExecution(ctx context.Context, sessionID, executionID string) (store.Execution, error) {
 	if sessionID == "" || executionID == "" {
 		return store.Execution{}, errors.New("session_id and execution_id are required")
+	}
+	if a.cfg.Mode == "server" {
+		owned, err := a.store.SessionOwnedBy(ctx, sessionID, credentialFromContext(ctx))
+		if err != nil {
+			return store.Execution{}, err
+		}
+		if !owned {
+			return store.Execution{}, errors.New("execution not found")
+		}
 	}
 	execution, err := a.store.GetExecution(ctx, sessionID, executionID)
 	if errors.Is(err, store.ErrNotFound) {

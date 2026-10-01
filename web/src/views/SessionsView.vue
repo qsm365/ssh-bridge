@@ -22,7 +22,7 @@ onMounted(async()=>{try{sessions.value=(await api.sessions()).items??[]}catch(ca
     <div v-else class="session-list">
       <RouterLink v-for="session in filtered" :key="session.id" :to="`/sessions/${session.id}`" class="session-row">
         <div class="session-state" :class="{ attention: session.has_error }"><i></i></div>
-        <div class="session-copy"><div class="session-title-line"><h3>{{ session.title || '未命名会话' }}</h3><span v-if="session.has_error" class="session-status attention">有异常</span></div><p>{{ session.id }}</p></div>
+        <div class="session-copy"><div class="session-title-line"><h3>{{ session.title || '未命名会话' }}</h3><span v-if="session.has_error" class="session-status attention">有异常</span></div><p>{{ session.id }}<span v-if="session.agent_credential_name"> · Agent：{{ session.agent_credential_name }}</span></p></div>
         <div class="session-metric"><strong>{{ session.execution_count }}</strong><span>次执行</span></div><div class="session-time"><strong>{{ formatTime(session.updated_at) }}</strong><span>最近活动</span></div><span class="row-arrow">›</span>
       </RouterLink>
     </div>

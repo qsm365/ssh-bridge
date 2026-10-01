@@ -10,6 +10,11 @@ func TestLocalModeRejectsNonLoopbackListener(t *testing.T) {
 	if err := base.Validate(); err != nil {
 		t.Fatalf("loopback listener rejected: %v", err)
 	}
+	base.AgentToken = ""
+	if err := base.Validate(); err == nil {
+		t.Fatal("local mode without Agent token was accepted")
+	}
+	base.AgentToken = "token"
 	base.Listen = "0.0.0.0:7408"
 	if err := base.Validate(); err == nil {
 		t.Fatal("non-loopback listener was accepted")
@@ -17,7 +22,7 @@ func TestLocalModeRejectsNonLoopbackListener(t *testing.T) {
 }
 
 func TestServerModeRequiresDatabaseAndAdminPassword(t *testing.T) {
-	base := Config{Mode: ModeServer, Listen: "127.0.0.1:7408", AgentToken: "token", AdminPassword: "test-password", CommandTimeout: time.Minute}
+	base := Config{Mode: ModeServer, Listen: "127.0.0.1:7408", AdminPassword: "test-password", CommandTimeout: time.Minute}
 	if err := base.Validate(); err == nil {
 		t.Fatal("server mode without database URL was accepted")
 	}
