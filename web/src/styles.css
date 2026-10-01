@@ -58,10 +58,10 @@ a { color: inherit; text-decoration: none; }
 .topbar { height: 86px; padding: 0 34px; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,.88); border-bottom: 1px solid #e9ecf2; backdrop-filter: blur(12px); }
 .topbar h1 { margin: 0; font-size: 20px; letter-spacing: -.2px; }
 .topbar p { margin: 5px 0 0; color: #8a93a6; font-size: 12px; }
-.top-actions { display: flex; align-items: center; gap: 12px; }
-.mock-pill { padding: 5px 8px; border-radius: 5px; color: #9a6a16; background: #fff4d9; border: 1px solid #f6dfa8; font-size: 9px; font-weight: 800; letter-spacing: 1.3px; }
-.icon-button, .mobile-menu { position: relative; width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 9px; color: #657087; background: #fff; }
-.notification-dot { position: absolute; top: 7px; right: 7px; width: 5px; height: 5px; border-radius: 50%; background: #ef5f5f; }
+.language-select { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; color: #657087; font-size: 12px; white-space: nowrap; }
+.language-icon { width: 18px; height: 18px; flex: 0 0 auto; }
+.language-select select { border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; color: #354563; background: #fff; font: inherit; cursor: pointer; }
+.mobile-menu { position: relative; width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 9px; color: #657087; background: #fff; }
 .mobile-menu { display: none; }
 .page-container { width: min(1440px, 100%); margin: 0 auto; padding: 26px 32px 48px; }
 
@@ -186,6 +186,7 @@ tbody tr { transition: .15s; } tbody tr:hover { background: #fafbfe; }
 .login-page { position: relative; min-height: 100vh; display: grid; place-items: center; padding: 24px; overflow: hidden; background: linear-gradient(145deg, #eef2fb, #f8f9fc 55%, #edf3ff); }.login-decoration { position: absolute; inset: 0; pointer-events: none; }.login-decoration span { position: absolute; border-radius: 50%; filter: blur(1px); }.login-decoration span:nth-child(1) { width: 360px; height: 360px; top: -150px; right: -70px; background: rgba(86,119,230,.12); }.login-decoration span:nth-child(2) { width: 250px; height: 250px; bottom: -100px; left: -50px; background: rgba(37,174,133,.08); }.login-decoration span:nth-child(3) { width: 8px; height: 8px; top: 20%; left: 22%; background: #6686ef; box-shadow: 40px 280px #9bb0f0, 620px 100px #a9b9e7; }.login-card { position: relative; width: min(400px, 100%); padding: 36px 38px 30px; text-align: center; background: rgba(255,255,255,.93); border: 1px solid rgba(255,255,255,.8); border-radius: 17px; box-shadow: 0 24px 70px rgba(25,39,73,.13); }.login-logo { width: 45px; height: 45px; margin: 0 auto 18px; }.login-card h1 { margin: 0; font-size: 20px; }.login-card > p { margin: 7px 0 0; color: #8791a3; font-size: 11px; }.mock-notice { margin: 19px 0; padding: 9px; color: #88631f; background: #fff7e6; border: 1px solid #f6e5bb; border-radius: 7px; font-size: 9px; }.login-card form { display: grid; gap: 14px; text-align: left; }.login-card label { display: grid; gap: 7px; }.login-card label span { color: #58657a; font-size: 10px; font-weight: 600; }.login-card input { height: 40px; padding: 0 12px; border: 1px solid #dce1ea; border-radius: 8px; outline: 0; font-size: 11px; }.login-card input:focus { border-color: #718aeb; box-shadow: 0 0 0 3px rgba(74,103,214,.09); }.login-button { height: 42px; margin-top: 3px; }.login-card > small { display: block; margin-top: 22px; color: #9da5b3; font-size: 9px; }
 
 .login-card form { margin-top: 24px; }.login-card .form-error { margin: 0; }
+.login-language { position: absolute; top: 24px; right: 24px; z-index: 1; }
 
 @media (max-width: 1100px) {
   .stats-grid { grid-template-columns: repeat(2, 1fr); }

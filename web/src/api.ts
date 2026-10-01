@@ -1,4 +1,5 @@
 import type { AuditSession, Execution, Target } from './types'
+import { locale, t } from './i18n'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api/v1${path}`, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...init?.headers }, ...init })
@@ -6,8 +7,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	if (response.status === 401 && path !== '/auth/me' && path !== '/auth/login' && window.location.pathname !== '/login') {
 		window.location.assign(`/login?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`)
 	}
-    const body = await response.json().catch(() => ({ error: `请求失败 (${response.status})` }))
-    throw new Error(body.error || `请求失败 (${response.status})`)
+    const body = await response.json().catch(() => ({ error: t('请求失败 ({status})', { status: response.status }) }))
+    throw new Error(body.error || t('请求失败 ({status})', { status: response.status }))
   }
   if (response.status === 204) return undefined as T
   return response.json()
@@ -45,7 +46,7 @@ export interface SystemInfo { mode: 'local' | 'server'; database: 'sqlite' | 'po
 
 export function formatTime(value: string | null) {
   if (!value) return '—'
-  return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium', hour12: false }).format(new Date(value))
+  return new Intl.DateTimeFormat(locale.value, { dateStyle: 'short', timeStyle: 'medium', hour12: false }).format(new Date(value))
 }
 export function formatBytes(value: number) {
   if (value < 1024) return `${value} B`

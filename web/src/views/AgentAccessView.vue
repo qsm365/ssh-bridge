@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import type { AgentTokenInfo } from '../api'
 import ServerCredentials from '../components/ServerCredentials.vue'
+import { t } from '../i18n'
 
 const info = ref<AgentTokenInfo | null>(null)
 const loading = ref(true)
@@ -26,7 +27,7 @@ async function load() {
     serverMode.value = (await api.systemInfo()).mode === 'server'
     if (!serverMode.value) info.value = await api.agentToken()
   }
-  catch (cause) { error.value = cause instanceof Error ? cause.message : '加载失败' }
+  catch (cause) { error.value = cause instanceof Error ? cause.message : t('加载失败') }
   finally { loading.value = false }
 }
 
@@ -35,15 +36,15 @@ async function copy(value: string, label: string) {
     await navigator.clipboard.writeText(value)
     copied.value = label
     window.setTimeout(() => { if (copied.value === label) copied.value = '' }, 1600)
-  } catch { error.value = '复制失败，请手动选择文本' }
+  } catch { error.value = t('复制失败，请手动选择文本') }
 }
 
 async function regenerate() {
-  if (!window.confirm('重新生成后，当前 Token 会立即失效。确定继续吗？')) return
+  if (!window.confirm(t('重新生成后，当前 Token 会立即失效。确定继续吗？'))) return
   rotating.value = true
   error.value = ''
   try { info.value = await api.regenerateAgentToken() }
-  catch (cause) { error.value = cause instanceof Error ? cause.message : '重新生成失败' }
+  catch (cause) { error.value = cause instanceof Error ? cause.message : t('重新生成失败') }
   finally { rotating.value = false }
 }
 
@@ -52,49 +53,49 @@ onMounted(load)
 
 <template>
   <section class="page-intro">
-    <div><h2>Agent 接入</h2><p>{{ serverMode ? 'Server 模式使用具名 Agent 凭据和主机授权' : '连接 MCP Server，并管理本机 Agent 使用的访问 Token' }}</p></div>
+    <div><h2>{{ t('Agent 接入') }}</h2><p>{{ serverMode ? t('Server 模式使用具名 Agent 凭据和主机授权') : t('连接 MCP Server，并管理本机 Agent 使用的访问 Token') }}</p></div>
   </section>
 
-  <div v-if="loading" class="panel empty-state">正在加载…</div>
+  <div v-if="loading" class="panel empty-state">{{ t('正在加载…') }}</div>
   <ServerCredentials v-else-if="serverMode" />
   <p v-else-if="error && !info" class="form-error panel">{{ error }}</p>
   <div v-else-if="info" class="access-layout">
     <section class="panel access-section">
       <div class="section-title">
-        <div><h3>访问 Token</h3><p>用于 Agent 调用 HTTP API 和 MCP Server</p></div>
-        <span class="token-status"><i></i>已启用</span>
+        <div><h3>{{ t('访问 Token') }}</h3><p>{{ t('用于 Agent 调用 HTTP API 和 MCP Server') }}</p></div>
+        <span class="token-status"><i></i>{{ t('已启用') }}</span>
       </div>
 
       <div v-if="info.token_visible" class="token-notice">
         <span>!</span>
-        <p><strong>请现在复制保存</strong>完整 Token 只在首次生成或重新生成后展示一次，离开页面后将不再显示。</p>
+        <p><strong>{{ t('请现在复制保存') }}</strong>{{ t('完整 Token 只在首次生成或重新生成后展示一次，离开页面后将不再显示。') }}</p>
       </div>
       <div v-else class="info-banner">
-        <span>i</span><p>Token 已安全保存在本机数据目录中。为了避免泄露，页面不会再次读取并展示原值；如已遗失，可以重新生成。</p>
+        <span>i</span><p>{{ t('Token 已安全保存在本机数据目录中。为了避免泄露，页面不会再次读取并展示原值；如已遗失，可以重新生成。') }}</p>
       </div>
 
       <div class="token-field">
         <code>{{ info.token_visible ? info.token : '•••••••••••••••••••••••••••••••••••••••••••' }}</code>
-        <button v-if="info.token_visible" class="secondary-button" @click="copy(info.token, 'token')">{{ copied === 'token' ? '已复制' : '复制 Token' }}</button>
+        <button v-if="info.token_visible" class="secondary-button" @click="copy(info.token, 'token')">{{ copied === 'token' ? t('已复制') : t('复制 Token') }}</button>
       </div>
       <div class="access-actions">
-        <small>重新生成后，使用旧 Token 的 Agent 会立即无法调用。</small>
-        <button class="danger-ghost" :disabled="rotating" @click="regenerate">{{ rotating ? '正在生成…' : '重新生成 Token' }}</button>
+        <small>{{ t('重新生成后，使用旧 Token 的 Agent 会立即无法调用。') }}</small>
+        <button class="danger-ghost" :disabled="rotating" @click="regenerate">{{ rotating ? t('正在生成…') : t('重新生成 Token') }}</button>
       </div>
       <p v-if="error" class="form-error">{{ error }}</p>
     </section>
 
     <section class="panel access-section">
-      <div class="section-title"><div><h3>MCP Server</h3><p>支持 Streamable HTTP，复用现有执行与审计能力</p></div></div>
-      <div class="access-row"><span>连接地址</span><code>{{ mcpURL }}</code><button class="text-button" @click="copy(mcpURL, 'url')">{{ copied === 'url' ? '已复制' : '复制' }}</button></div>
+      <div class="section-title"><div><h3>MCP Server</h3><p>{{ t('支持 Streamable HTTP，复用现有执行与审计能力') }}</p></div></div>
+      <div class="access-row"><span>{{ t('连接地址') }}</span><code>{{ mcpURL }}</code><button class="text-button" @click="copy(mcpURL, 'url')">{{ copied === 'url' ? t('已复制') : t('复制') }}</button></div>
       <div class="tool-chips"><span>list_targets</span><span>execute_command</span><span>get_execution</span><span>wait_execution</span><span>download_output</span></div>
     </section>
 
     <section class="panel access-section config-section">
-      <div class="section-title"><div><h3>Codex 配置</h3><p>添加到 ~/.codex/config.toml，Token 通过环境变量提供</p></div><button class="secondary-button" @click="copy(codexConfig, 'config')">{{ copied === 'config' ? '已复制' : '复制配置' }}</button></div>
+      <div class="section-title"><div><h3>{{ t('Codex 配置') }}</h3><p>{{ t('添加到 ~/.codex/config.toml，Token 通过环境变量提供') }}</p></div><button class="secondary-button" @click="copy(codexConfig, 'config')">{{ copied === 'config' ? t('已复制') : t('复制配置') }}</button></div>
       <pre>{{ codexConfig }}</pre>
       <template v-if="info.token_visible">
-        <div class="section-title command-title"><div><h3>设置 Token</h3><p>在启动 Agent 的环境中设置</p></div><button class="secondary-button" @click="copy(tokenCommand, 'command')">{{ copied === 'command' ? '已复制' : '复制命令' }}</button></div>
+        <div class="section-title command-title"><div><h3>{{ t('设置 Token') }}</h3><p>{{ t('在启动 Agent 的环境中设置') }}</p></div><button class="secondary-button" @click="copy(tokenCommand, 'command')">{{ copied === 'command' ? t('已复制') : t('复制命令') }}</button></div>
         <pre>{{ tokenCommand }}</pre>
       </template>
     </section>
